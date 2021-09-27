@@ -364,7 +364,7 @@ func NewServer(opts *Options) (*Server, error) {
 		httpReqStats: make(map[string]uint64), // Used to track HTTP requests
 	}
 
-	if opts.tlsConfigOpts.RateLimit > 0 {
+	if opts.tlsConfigOpts != nil && opts.tlsConfigOpts.RateLimit > 0 {
 		s.connRateCounter = newRateCounter(opts.tlsConfigOpts.RateLimit)
 	}
 
