@@ -1819,6 +1819,31 @@ func TestTLSPinnedCertsClient(t *testing.T) {
 	nc.Close()
 }
 
+func TestTLSConnectionRate(t *testing.T) {
+	srv, opts := RunServerWithConfig("./configs/tls_rate.conf")
+	defer srv.Shutdown()
+
+	endpoint := fmt.Sprintf("%s:%d", opts.Host, opts.Port)
+	nurl := fmt.Sprintf("tls://%s:%s@%s/", opts.Username, opts.Password, endpoint)
+
+	var err error
+	count := 0
+	for count < 10 {
+		var nc *nats.Conn
+		nc, err = nats.Connect(nurl, nats.RootCAs("./configs/certs/ca.pem"))
+
+		if err != nil {
+			break
+		}
+		nc.Close()
+		count++
+	}
+
+	if count != 3 {
+		t.Fatalf("Expected 3 connections per second, got %d (%v)", count, err)
+	}
+}
+
 func TestTLSPinnedCertsRoute(t *testing.T) {
 	tmplSeed := `
 	host: localhost

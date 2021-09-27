@@ -497,6 +497,7 @@ type TLSConfigOpts struct {
 	Map               bool
 	TLSCheckKnownURLs bool
 	Timeout           float64
+	RateLimit         int64
 	Ciphers           []uint16
 	CurvePreferences  []tls.CurveID
 	PinnedCerts       PinnedCertSet
@@ -3604,6 +3605,15 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 				return nil, &configErr{tk, "error parsing tls config, 'timeout' wrong type"}
 			}
 			tc.Timeout = at
+		case "connection_rate_limit":
+			at := int64(0)
+			switch mv := mv.(type) {
+			case int64:
+				at = mv
+			default:
+				return nil, &configErr{tk, "error parsing tls config, 'connection_rate_limit' wrong type"}
+			}
+			tc.RateLimit = at
 		case "pinned_certs":
 			ra, ok := mv.([]interface{})
 			if !ok {
