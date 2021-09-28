@@ -1820,17 +1820,28 @@ func TestTLSPinnedCertsClient(t *testing.T) {
 }
 
 func TestTLSConnectionRate(t *testing.T) {
-	srv, opts := RunServerWithConfig("./configs/tls_rate.conf")
-	defer srv.Shutdown()
+	config := `
+        host: localhost
+	    port: -1
+		
+		tls {
+		  cert_file: "./configs/certs/server-cert.pem"
+		  key_file:  "./configs/certs/server-key.pem"
+		  connection_rate_limit: 3
+		}
+	`
 
-	endpoint := fmt.Sprintf("%s:%d", opts.Host, opts.Port)
-	nurl := fmt.Sprintf("tls://%s:%s@%s/", opts.Username, opts.Password, endpoint)
+	confFileName := createConfFile(t, []byte(config))
+	defer removeFile(t, confFileName)
+
+	srv, _ := RunServerWithConfig(confFileName)
+	defer srv.Shutdown()
 
 	var err error
 	count := 0
 	for count < 10 {
 		var nc *nats.Conn
-		nc, err = nats.Connect(nurl, nats.RootCAs("./configs/certs/ca.pem"))
+		nc, err = nats.Connect(srv.ClientURL(), nats.RootCAs("./configs/certs/ca.pem"))
 
 		if err != nil {
 			break

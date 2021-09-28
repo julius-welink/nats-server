@@ -364,7 +364,7 @@ func NewServer(opts *Options) (*Server, error) {
 		httpReqStats: make(map[string]uint64), // Used to track HTTP requests
 	}
 
-	if opts.tlsConfigOpts != nil && opts.tlsConfigOpts.RateLimit > 0 {
+	if opts.TLSRateLimit > 0 {
 		s.connRateCounter = newRateCounter(opts.tlsConfigOpts.RateLimit)
 	}
 
@@ -2416,7 +2416,7 @@ func (s *Server) createClient(conn net.Conn) *client {
 	// Check for TLS
 	if !isClosed && tlsRequired {
 		if s.connRateCounter != nil && !s.connRateCounter.allow() {
-			c.Warnf("Connection rate exceeded. Rejecting connection from %s", conn.RemoteAddr())
+			c.Warnf("Rejecting connection due to TLS rate limiting")
 
 			c.mu.Unlock()
 			c.sendErr("Connection throttling is active. Please try again later.")

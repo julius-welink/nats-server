@@ -245,6 +245,7 @@ type Options struct {
 	TLSCaCert             string        `json:"-"`
 	TLSConfig             *tls.Config   `json:"-"`
 	TLSPinnedCerts        PinnedCertSet `json:"-"`
+	TLSRateLimit          int64         `json:"tls_connection_rate_limit"`
 	AllowNonTLS           bool          `json:"-"`
 	WriteDeadline         time.Duration `json:"-"`
 	MaxClosedClients      int           `json:"-"`
@@ -875,6 +876,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		o.TLSTimeout = tc.Timeout
 		o.TLSMap = tc.Map
 		o.TLSPinnedCerts = tc.PinnedCerts
+		o.TLSRateLimit = tc.RateLimit
 
 		// Need to keep track of path of the original TLS config
 		// and certs path for OCSP Stapling monitoring.
