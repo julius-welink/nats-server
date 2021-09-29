@@ -245,7 +245,7 @@ type Options struct {
 	TLSCaCert             string        `json:"-"`
 	TLSConfig             *tls.Config   `json:"-"`
 	TLSPinnedCerts        PinnedCertSet `json:"-"`
-	TLSRateLimit          int64         `json:"tls_connection_rate_limit"`
+	TLSRateLimit          int64         `json:"-"`
 	AllowNonTLS           bool          `json:"-"`
 	WriteDeadline         time.Duration `json:"-"`
 	MaxClosedClients      int           `json:"-"`

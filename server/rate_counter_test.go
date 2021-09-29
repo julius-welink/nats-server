@@ -1,4 +1,4 @@
-// Copyright 2012-2021 The NATS Authors
+// Copyright 2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -20,7 +20,7 @@ import (
 
 func TestRateCounter(t *testing.T) {
 	counter := newRateCounter(10)
-	counter.interval = 10 * time.Millisecond
+	counter.interval = 100 * time.Millisecond
 
 	var i int
 	for i = 0; i <= 10; i++ {
@@ -33,7 +33,7 @@ func TestRateCounter(t *testing.T) {
 		t.Errorf("Expected i = 10, got %d", i)
 	}
 
-	time.Sleep(11 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 
 	if !counter.allow() {
 		t.Errorf("Expected true after current time window expired")

@@ -1821,13 +1821,11 @@ func TestTLSPinnedCertsClient(t *testing.T) {
 
 func TestTLSConnectionRate(t *testing.T) {
 	config := `
-        host: localhost
-	    port: -1
-		
+		listen: "127.0.0.1:-1"
 		tls {
-		  cert_file: "./configs/certs/server-cert.pem"
-		  key_file:  "./configs/certs/server-key.pem"
-		  connection_rate_limit: 3
+			cert_file: "./configs/certs/server-cert.pem"
+			key_file:  "./configs/certs/server-key.pem"
+			connection_rate_limit: 3
 		}
 	`
 
