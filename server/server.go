@@ -2415,7 +2415,7 @@ func (s *Server) createClient(conn net.Conn) *client {
 
 	// Check for TLS
 	if !isClosed && tlsRequired {
-		if s.connRateCounter != nil && !s.connRateCounter.allow() {
+		if s.connRateCounter != nil && !s.connRateCounter.allow() && !c.ExemptFromThrottleTLS() {
 			c.Warnf("Rejecting connection due to TLS rate limiting")
 
 			c.mu.Unlock()
