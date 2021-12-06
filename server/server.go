@@ -258,6 +258,8 @@ type Server struct {
 	rerrMu   sync.Mutex
 	rerrLast time.Time
 
+	connRateCounter *rateCounter
+
 	// If there is a system account configured, to still support the $G account,
 	// the server will create a fake user and add it to the list of users.
 	// Keep track of what that user name is for config reload purposes.
@@ -360,6 +362,10 @@ func NewServer(opts *Options) (*Server, error) {
 		eventIds:     nuid.New(),
 		routesToSelf: make(map[string]struct{}),
 		httpReqStats: make(map[string]uint64), // Used to track HTTP requests
+	}
+
+	if opts.TLSRateLimit > 0 {
+		s.connRateCounter = newRateCounter(opts.tlsConfigOpts.RateLimit)
 	}
 
 	// Trusted root operator keys.
@@ -2409,6 +2415,15 @@ func (s *Server) createClient(conn net.Conn) *client {
 
 	// Check for TLS
 	if !isClosed && tlsRequired {
+		if s.connRateCounter != nil && !s.connRateCounter.allow() {
+			c.Warnf("Rejecting connection due to TLS rate limiting")
+
+			c.mu.Unlock()
+			c.sendErr("Connection throttling is active. Please try again later.")
+			c.closeConnection(MaxConnectionsExceeded)
+			return nil
+		}
+
 		// If we have a prebuffer create a multi-reader.
 		if len(pre) > 0 {
 			c.nc = &tlsMixConn{c.nc, bytes.NewBuffer(pre)}
