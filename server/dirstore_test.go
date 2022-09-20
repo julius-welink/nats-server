@@ -17,7 +17,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"math/rand"
 	"os"
@@ -30,6 +29,40 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
+var (
+	one, two, three, four  = "", "", "", ""
+	jwt1, jwt2, jwt3, jwt4 = "", "", "", ""
+	op                     nkeys.KeyPair
+)
+
+func init() {
+	op, _ = nkeys.CreateOperator()
+
+	nkone, _ := nkeys.CreateAccount()
+	pub, _ := nkone.PublicKey()
+	one = pub
+	ac := jwt.NewAccountClaims(pub)
+	jwt1, _ = ac.Encode(op)
+
+	nktwo, _ := nkeys.CreateAccount()
+	pub, _ = nktwo.PublicKey()
+	two = pub
+	ac = jwt.NewAccountClaims(pub)
+	jwt2, _ = ac.Encode(op)
+
+	nkthree, _ := nkeys.CreateAccount()
+	pub, _ = nkthree.PublicKey()
+	three = pub
+	ac = jwt.NewAccountClaims(pub)
+	jwt3, _ = ac.Encode(op)
+
+	nkfour, _ := nkeys.CreateAccount()
+	pub, _ = nkfour.PublicKey()
+	four = pub
+	ac = jwt.NewAccountClaims(pub)
+	jwt4, _ = ac.Encode(op)
+}
+
 func TestShardedDirStoreWriteAndReadonly(t *testing.T) {
 	t.Parallel()
 	dir := createDir(t, "jwtstore_test")
@@ -38,10 +71,10 @@ func TestShardedDirStoreWriteAndReadonly(t *testing.T) {
 	require_NoError(t, err)
 
 	expected := map[string]string{
-		"one":   "alpha",
-		"two":   "beta",
-		"three": "gamma",
-		"four":  "delta",
+		one:   "alpha",
+		two:   "beta",
+		three: "gamma",
+		four:  "delta",
 	}
 
 	for k, v := range expected {
@@ -91,10 +124,10 @@ func TestUnshardedDirStoreWriteAndReadonly(t *testing.T) {
 	require_NoError(t, err)
 
 	expected := map[string]string{
-		"one":   "alpha",
-		"two":   "beta",
-		"three": "gamma",
-		"four":  "delta",
+		one:   "alpha",
+		two:   "beta",
+		three: "gamma",
+		four:  "delta",
 	}
 
 	require_False(t, store.IsReadOnly())
@@ -172,10 +205,10 @@ func TestShardedDirStorePackMerge(t *testing.T) {
 	require_NoError(t, err)
 
 	expected := map[string]string{
-		"one":   "alpha",
-		"two":   "beta",
-		"three": "gamma",
-		"four":  "delta",
+		one:   "alpha",
+		two:   "beta",
+		three: "gamma",
+		four:  "delta",
 	}
 
 	require_False(t, store.IsReadOnly())
@@ -246,10 +279,10 @@ func TestShardedToUnsharedDirStorePackMerge(t *testing.T) {
 	require_NoError(t, err)
 
 	expected := map[string]string{
-		"one":   "alpha",
-		"two":   "beta",
-		"three": "gamma",
-		"four":  "delta",
+		one:   "alpha",
+		two:   "beta",
+		three: "gamma",
+		four:  "delta",
 	}
 
 	require_False(t, store.IsReadOnly())
@@ -359,7 +392,7 @@ func createTestAccount(t *testing.T, dirStore *DirJWTStore, expSec int, accKey n
 
 func assertStoreSize(t *testing.T, dirStore *DirJWTStore, length int) {
 	t.Helper()
-	f, err := ioutil.ReadDir(dirStore.directory)
+	f, err := os.ReadDir(dirStore.directory)
 	require_NoError(t, err)
 	require_Len(t, len(f), length)
 	dirStore.Lock()
@@ -395,7 +428,7 @@ func TestExpiration(t *testing.T) {
 	failAt := time.Now().Add(4 * time.Second)
 	for time.Now().Before(failAt) {
 		time.Sleep(100 * time.Millisecond)
-		f, err := ioutil.ReadDir(dir)
+		f, err := os.ReadDir(dir)
 		require_NoError(t, err)
 		if len(f) == 1 {
 			lh := dirStore.Hash()
@@ -644,7 +677,7 @@ func TestReload(t *testing.T) {
 		jwt, err := account.Encode(accKey)
 		require_NoError(t, err)
 		file := fmt.Sprintf("%s/%s.jwt", dir, pKey)
-		err = ioutil.WriteFile(file, []byte(jwt), 0644)
+		err = os.WriteFile(file, []byte(jwt), 0644)
 		require_NoError(t, err)
 		return file
 	}
@@ -703,7 +736,7 @@ func TestExpirationUpdate(t *testing.T) {
 	h = nh
 
 	time.Sleep(1500 * time.Millisecond)
-	f, err := ioutil.ReadDir(dir)
+	f, err := os.ReadDir(dir)
 	require_NoError(t, err)
 	require_Len(t, len(f), 1)
 
@@ -713,7 +746,7 @@ func TestExpirationUpdate(t *testing.T) {
 	h = nh
 
 	time.Sleep(1500 * time.Millisecond)
-	f, err = ioutil.ReadDir(dir)
+	f, err = os.ReadDir(dir)
 	require_NoError(t, err)
 	require_Len(t, len(f), 1)
 
@@ -723,7 +756,7 @@ func TestExpirationUpdate(t *testing.T) {
 	h = nh
 
 	time.Sleep(1500 * time.Millisecond)
-	f, err = ioutil.ReadDir(dir)
+	f, err = os.ReadDir(dir)
 	require_NoError(t, err)
 	require_Len(t, len(f), 1)
 
@@ -733,7 +766,7 @@ func TestExpirationUpdate(t *testing.T) {
 	h = nh
 
 	time.Sleep(1500 * time.Millisecond)
-	f, err = ioutil.ReadDir(dir)
+	f, err = os.ReadDir(dir)
 	require_NoError(t, err)
 	require_Len(t, len(f), 0)
 
@@ -747,7 +780,7 @@ func TestTTL(t *testing.T) {
 	dir := createDir(t, "jwtstore_test")
 	require_OneJWT := func() {
 		t.Helper()
-		f, err := ioutil.ReadDir(dir)
+		f, err := os.ReadDir(dir)
 		require_NoError(t, err)
 		require_Len(t, len(f), 1)
 	}
@@ -771,7 +804,7 @@ func TestTTL(t *testing.T) {
 		// observe expiration
 		for i := 0; i < 40; i++ {
 			time.Sleep(50 * time.Millisecond)
-			f, err := ioutil.ReadDir(dir)
+			f, err := os.ReadDir(dir)
 			require_NoError(t, err)
 			if len(f) == 0 {
 				return
@@ -810,7 +843,7 @@ func TestRemove(t *testing.T) {
 			dir := createDir(t, "jwtstore_test")
 			require_OneJWT := func() {
 				t.Helper()
-				f, err := ioutil.ReadDir(dir)
+				f, err := os.ReadDir(dir)
 				require_NoError(t, err)
 				require_Len(t, len(f), 1)
 			}
@@ -848,10 +881,10 @@ const infDur = time.Duration(math.MaxInt64)
 func TestNotificationOnPack(t *testing.T) {
 	t.Parallel()
 	jwts := map[string]string{
-		"key1": "value",
-		"key2": "value",
-		"key3": "value",
-		"key4": "value",
+		one:   jwt1,
+		two:   jwt2,
+		three: jwt3,
+		four:  jwt4,
 	}
 	notificationChan := make(chan struct{}, len(jwts)) // set to same len so all extra will block
 	notification := func(pubKey string) {
@@ -921,12 +954,13 @@ func TestNotificationOnPackWalk(t *testing.T) {
 		store[i] = mergeStore
 	}
 	for i := 0; i < iterCnt; i++ { //iterations
-		jwt := make(map[string]string)
+		jwts := make(map[string]string)
 		for j := 0; j < keyCnt; j++ {
-			key := fmt.Sprintf("key%d-%d", i, j)
-			value := "value"
-			jwt[key] = value
-			store[0].SaveAcc(key, value)
+			kp, _ := nkeys.CreateAccount()
+			key, _ := kp.PublicKey()
+			ac := jwt.NewAccountClaims(key)
+			jwts[key], _ = ac.Encode(op)
+			require_NoError(t, store[0].SaveAcc(key, jwts[key]))
 		}
 		for j := 0; j < storeCnt-1; j++ { // stores
 			err := store[j].PackWalk(3, func(partialPackMsg string) {

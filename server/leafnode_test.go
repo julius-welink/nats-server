@@ -19,7 +19,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"net"
 	"net/url"
@@ -361,6 +360,7 @@ func TestLeafNodeAccountNotFound(t *testing.T) {
 	u, _ := url.Parse(fmt.Sprintf("nats://127.0.0.1:%d", ob.LeafNode.Port))
 
 	oa := DefaultOptions()
+	oa.Cluster.Name = "xyz"
 	oa.LeafNode.ReconnectInterval = 10 * time.Millisecond
 	oa.LeafNode.Remotes = []*RemoteLeafOpts{
 		{
@@ -499,6 +499,7 @@ func TestLeafNodeRTT(t *testing.T) {
 
 	lnBURL, _ := url.Parse(fmt.Sprintf("nats://127.0.0.1:%d", ob.LeafNode.Port))
 	oa := DefaultOptions()
+	oa.Cluster.Name = "xyz"
 	oa.PingInterval = 15 * time.Millisecond
 	oa.LeafNode.Remotes = []*RemoteLeafOpts{{URLs: []*url.URL{lnBURL}}}
 	sa := RunServer(oa)
@@ -563,6 +564,7 @@ func TestLeafNodeRTT(t *testing.T) {
 	// Now check that initial RTT is computed prior to first PingInterval
 	// Get new options to avoid possible race changing the ping interval.
 	ob = DefaultOptions()
+	ob.Cluster.Name = "xyz"
 	ob.PingInterval = time.Minute
 	ob.LeafNode.Host = "127.0.0.1"
 	ob.LeafNode.Port = -1
@@ -858,6 +860,7 @@ func TestLeafNodeLoop(t *testing.T) {
 	sa.SetLogger(l, false, false)
 
 	ob := DefaultOptions()
+	ob.Cluster.Name = "xyz"
 	ob.LeafNode.ReconnectInterval = 10 * time.Millisecond
 	ob.LeafNode.Port = 5678
 	ua, _ := url.Parse("nats://127.0.0.1:1234")
@@ -1263,6 +1266,7 @@ func TestLeafNodePermissions(t *testing.T) {
 
 	u, _ := url.Parse(fmt.Sprintf("nats://%s:%d", lo1.LeafNode.Host, lo1.LeafNode.Port))
 	lo2 := DefaultOptions()
+	lo2.Cluster.Name = "xyz"
 	lo2.LeafNode.ReconnectInterval = 5 * time.Millisecond
 	lo2.LeafNode.connDelay = 100 * time.Millisecond
 	lo2.LeafNode.Remotes = []*RemoteLeafOpts{
@@ -1302,7 +1306,7 @@ func TestLeafNodePermissions(t *testing.T) {
 	// Create a sub on ">" on LN1
 	subAll := natsSubSync(t, nc1, ">")
 	// this should be registered in LN2 (there is 1 sub for LN1 $LDS subject) + SYS IMPORTS
-	checkSubs(ln2.globalAccount(), 8)
+	checkSubs(ln2.globalAccount(), 10)
 
 	// Check deny export clause from messages published from LN2
 	for _, test := range []struct {
@@ -1329,7 +1333,7 @@ func TestLeafNodePermissions(t *testing.T) {
 
 	subAll.Unsubscribe()
 	// Goes down by 1.
-	checkSubs(ln2.globalAccount(), 7)
+	checkSubs(ln2.globalAccount(), 9)
 
 	// We used to make sure we would not do subscriptions however that
 	// was incorrect. We need to check publishes, not the subscriptions.
@@ -1354,7 +1358,7 @@ func TestLeafNodePermissions(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			sub := natsSubSync(t, nc2, test.subSubject)
-			checkSubs(ln2.globalAccount(), 8)
+			checkSubs(ln2.globalAccount(), 10)
 
 			if !test.ok {
 				nc1.Publish(test.pubSubject, []byte("msg"))
@@ -1362,12 +1366,12 @@ func TestLeafNodePermissions(t *testing.T) {
 					t.Fatalf("Did not expect to get the message")
 				}
 			} else {
-				checkSubs(ln1.globalAccount(), 7)
+				checkSubs(ln1.globalAccount(), 9)
 				nc1.Publish(test.pubSubject, []byte("msg"))
 				natsNexMsg(t, sub, time.Second)
 			}
 			sub.Unsubscribe()
-			checkSubs(ln1.globalAccount(), 6)
+			checkSubs(ln1.globalAccount(), 8)
 		})
 	}
 }
@@ -1406,6 +1410,7 @@ func TestLeafNodePermissionsConcurrentAccess(t *testing.T) {
 
 	u, _ := url.Parse(fmt.Sprintf("nats://%s:%d", lo1.LeafNode.Host, lo1.LeafNode.Port))
 	lo2 := DefaultOptions()
+	lo2.Cluster.Name = "xyz"
 	lo2.LeafNode.ReconnectInterval = 5 * time.Millisecond
 	lo2.LeafNode.connDelay = 500 * time.Millisecond
 	lo2.LeafNode.Remotes = []*RemoteLeafOpts{
@@ -1487,8 +1492,8 @@ func TestLeafNodeExportPermissionsNotForSpecialSubs(t *testing.T) {
 	// The deny is totally restrictive, but make sure that we still accept the $LDS, $GR and _GR_ go from LN1.
 	checkFor(t, time.Second, 15*time.Millisecond, func() error {
 		// We should have registered the 3 subs from the accepting leafnode.
-		if n := ln2.globalAccount().TotalSubs(); n != 7 {
-			return fmt.Errorf("Expected %d subs, got %v", 7, n)
+		if n := ln2.globalAccount().TotalSubs(); n != 8 {
+			return fmt.Errorf("Expected %d subs, got %v", 8, n)
 		}
 		return nil
 	})
@@ -1675,6 +1680,7 @@ func TestLeafNodeTmpClients(t *testing.T) {
 	// Check with normal leafnode connection that once connected,
 	// the tmp map is also emptied.
 	bo := DefaultOptions()
+	bo.Cluster.Name = "xyz"
 	bo.LeafNode.ReconnectInterval = 5 * time.Millisecond
 	u, err := url.Parse(fmt.Sprintf("nats://127.0.0.1:%d", ao.LeafNode.Port))
 	if err != nil {
@@ -1730,6 +1736,8 @@ func TestLeafNodeTLSVerifyAndMap(t *testing.T) {
 			defer s.Shutdown()
 
 			slo := DefaultOptions()
+			slo.Cluster.Name = "xyz"
+
 			sltlsc := &tls.Config{}
 			if test.provideCert {
 				tc := &TLSConfigOpts{
@@ -1970,7 +1978,7 @@ func TestLeafNodeOriginClusterInfo(t *testing.T) {
 			remotes [ { url: "nats://127.0.0.1:%d" } ]
 		}
 		cluster {
-			name: "abc"
+			name: "xyz"
 			listen: "127.0.0.1:-1"
 		}
 	`, hopts.LeafNode.Port)))
@@ -1988,8 +1996,8 @@ func TestLeafNodeOriginClusterInfo(t *testing.T) {
 	checkLeafNodeConnected(t, s)
 
 	l = grabLeaf()
-	if rc := l.remoteCluster(); rc != "abc" {
-		t.Fatalf("Expected a remote cluster name of \"abc\", got %q", rc)
+	if rc := l.remoteCluster(); rc != "xyz" {
+		t.Fatalf("Expected a remote cluster name of \"xyz\", got %q", rc)
 	}
 	pcid := l.cid
 
@@ -2266,6 +2274,7 @@ func TestLeafNodeNoDuplicateWithinCluster(t *testing.T) {
 
 	oLeaf1 := DefaultOptions()
 	oLeaf1.ServerName = "leaf1"
+	oLeaf1.Cluster.Name = "xyz"
 	oLeaf1.LeafNode.Remotes = []*RemoteLeafOpts{{URLs: []*url.URL{u}}}
 	leaf1 := RunServer(oLeaf1)
 	defer leaf1.Shutdown()
@@ -2274,6 +2283,7 @@ func TestLeafNodeNoDuplicateWithinCluster(t *testing.T) {
 
 	oLeaf2 := DefaultOptions()
 	oLeaf2.ServerName = "leaf2"
+	oLeaf2.Cluster.Name = "xyz"
 	oLeaf2.LeafNode.Remotes = []*RemoteLeafOpts{{URLs: []*url.URL{u}}}
 	oLeaf2.Routes = RoutesFromStr(leaf1ClusterURL)
 	leaf2 := RunServer(oLeaf2)
@@ -2379,11 +2389,13 @@ func TestLeafNodeLMsgSplit(t *testing.T) {
 	remoteLeafs := []*RemoteLeafOpts{{URLs: []*url.URL{u1, u2}}}
 
 	oLeaf1 := DefaultOptions()
+	oLeaf1.Cluster.Name = "xyz"
 	oLeaf1.LeafNode.Remotes = remoteLeafs
 	leaf1 := RunServer(oLeaf1)
 	defer leaf1.Shutdown()
 
 	oLeaf2 := DefaultOptions()
+	oLeaf2.Cluster.Name = "xyz"
 	oLeaf2.LeafNode.Remotes = remoteLeafs
 	oLeaf2.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", oLeaf1.Cluster.Port))
 	leaf2 := RunServer(oLeaf2)
@@ -2476,6 +2488,7 @@ func TestLeafNodeRouteParseLSUnsub(t *testing.T) {
 	remoteLeafs := []*RemoteLeafOpts{{URLs: []*url.URL{u2}}}
 
 	oLeaf2 := DefaultOptions()
+	oLeaf2.Cluster.Name = "xyz"
 	oLeaf2.LeafNode.Remotes = remoteLeafs
 	leaf2 := RunServer(oLeaf2)
 	defer leaf2.Shutdown()
@@ -2535,7 +2548,7 @@ func TestLeafNodeOperatorBadCfg(t *testing.T) {
 		system_account: %s
 		resolver: {
 			type: cache
-			dir: %s
+			dir: '%s'
 		}
 		leafnodes: {
 			%s
@@ -2611,7 +2624,11 @@ func TestLeafNodeTLSConfigReload(t *testing.T) {
 	// Wait for the error
 	select {
 	case err := <-lg.errCh:
-		if !strings.Contains(err, "unknown") {
+		// Since Go 1.18, we had to regenerate certs to not have to use GODEBUG="x509sha1=1"
+		// But on macOS, with our test CA certs, no SCTs included, it will fail
+		// for the reason "x509: “localhost” certificate is not standards compliant"
+		// instead of "unknown authority".
+		if !strings.Contains(err, "unknown") && !strings.Contains(err, "compliant") {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 	case <-time.After(2 * time.Second):
@@ -2860,7 +2877,7 @@ func TestLeafNodeWSBasic(t *testing.T) {
 
 			nc2 := natsConnect(t, ln.ClientURL())
 			defer nc2.Close()
-			msg1Payload := make([]byte, 512)
+			msg1Payload := make([]byte, 2048)
 			for i := 0; i < len(msg1Payload); i++ {
 				msg1Payload[i] = 'A'
 			}
@@ -2876,7 +2893,7 @@ func TestLeafNodeWSBasic(t *testing.T) {
 
 			checkSubInterest(t, s, globalAccountName, "bar", time.Second)
 
-			msg2Payload := make([]byte, 512)
+			msg2Payload := make([]byte, 2048)
 			for i := 0; i < len(msg2Payload); i++ {
 				msg2Payload[i] = 'B'
 			}
@@ -2893,10 +2910,10 @@ func TestLeafNodeWSBasic(t *testing.T) {
 				trackSizeConn.Unlock()
 
 				if test.acceptCompression && test.remoteCompression {
-					if size >= 100 {
+					if size >= 1024 {
 						t.Fatalf("Seems that there was no compression: size=%v", size)
 					}
-				} else if size < 500 {
+				} else if size < 2048 {
 					t.Fatalf("Seems compression was on while it should not: size=%v", size)
 				}
 			}
@@ -3297,6 +3314,7 @@ func TestLeafNodeStreamImport(t *testing.T) {
 
 	o2 := DefaultOptions()
 	o2.LeafNode.Port = -1
+	o2.Cluster.Name = "xyz"
 
 	accB := NewAccount("B")
 	if err := accB.AddStreamExport(">", nil); err != nil {
@@ -3381,7 +3399,7 @@ func TestLeafNodeRouteSubWithOrigin(t *testing.T) {
 	r1.Shutdown()
 	checkFor(t, time.Second, 15*time.Millisecond, func() error {
 		acc := l2.GlobalAccount()
-		if n := acc.TotalSubs(); n != 3 {
+		if n := acc.TotalSubs(); n != 4 {
 			return fmt.Errorf("Account %q should have 3 subs, got %v", acc.GetName(), n)
 		}
 		return nil
@@ -3795,239 +3813,6 @@ func TestLeafNodeNoMsgLoop(t *testing.T) {
 	}
 }
 
-func TestLeafNodeUniqueServerNameCrossJSDomain(t *testing.T) {
-	name := "NOT-UNIQUE"
-	test := func(s *Server, sIdExpected string, srvs ...*Server) {
-		ids := map[string]string{}
-		for _, srv := range srvs {
-			checkLeafNodeConnectedCount(t, srv, 2)
-			ids[srv.ID()] = srv.opts.JetStreamDomain
-		}
-		// ensure that an update for every server was received
-		sysNc := natsConnect(t, fmt.Sprintf("nats://admin:s3cr3t!@127.0.0.1:%d", s.opts.Port))
-		defer sysNc.Close()
-		sub, err := sysNc.SubscribeSync(fmt.Sprintf(serverStatsSubj, "*"))
-		require_NoError(t, err)
-		for {
-			m, err := sub.NextMsg(time.Second)
-			require_NoError(t, err)
-			tk := strings.Split(m.Subject, ".")
-			if domain, ok := ids[tk[2]]; ok {
-				delete(ids, tk[2])
-				require_Contains(t, string(m.Data), fmt.Sprintf(`"domain":"%s"`, domain))
-			}
-			if len(ids) == 0 {
-				break
-			}
-		}
-		cnt := 0
-		s.nodeToInfo.Range(func(key, value interface{}) bool {
-			cnt++
-			require_Equal(t, value.(nodeInfo).name, name)
-			require_Equal(t, value.(nodeInfo).id, sIdExpected)
-			return true
-		})
-		require_True(t, cnt == 1)
-	}
-	tmplA := `
-		listen: -1
-		server_name: %s
-		jetstream {
-			max_mem_store: 256MB,
-			max_file_store: 2GB,
-			store_dir: "%s",
-			domain: hub
-		}
-		accounts {
-			JSY { users = [ { user: "y", pass: "p" } ]; jetstream: true }
-			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
-		}
-		leaf {
-			port: -1
-		}
-    `
-	tmplL := `
-		listen: -1
-		server_name: %s
-		jetstream {
-			max_mem_store: 256MB,
-			max_file_store: 2GB,
-			store_dir: "%s",
-			domain: %s
-		}
-		accounts {
-			JSY { users = [ { user: "y", pass: "p" } ]; jetstream: true }
-			$SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] }
-		}
-		leaf {
-			remotes [
-				{ urls: [ %s ], account: "JSY" }
-				{ urls: [ %s ], account: "$SYS" }
-			]
-		}
-    `
-	t.Run("same-domain", func(t *testing.T) {
-		confA := createConfFile(t, []byte(fmt.Sprintf(tmplA, name, createDir(t, JetStreamStoreDir))))
-		defer removeFile(t, confA)
-		sA, oA := RunServerWithConfig(confA)
-		defer sA.Shutdown()
-		// using same domain as sA
-		confL := createConfFile(t, []byte(fmt.Sprintf(tmplL, name, createDir(t, JetStreamStoreDir), "hub",
-			fmt.Sprintf("nats://y:p@127.0.0.1:%d", oA.LeafNode.Port),
-			fmt.Sprintf("nats://admin:s3cr3t!@127.0.0.1:%d", oA.LeafNode.Port))))
-		defer removeFile(t, confL)
-		sL, _ := RunServerWithConfig(confL)
-		defer sL.Shutdown()
-		// as server name uniqueness is violates, sL.ID() is the expected value
-		test(sA, sL.ID(), sA, sL)
-	})
-	t.Run("different-domain", func(t *testing.T) {
-		confA := createConfFile(t, []byte(fmt.Sprintf(tmplA, name, createDir(t, JetStreamStoreDir))))
-		defer removeFile(t, confA)
-		sA, oA := RunServerWithConfig(confA)
-		defer sA.Shutdown()
-		// using different domain as sA
-		confL := createConfFile(t, []byte(fmt.Sprintf(tmplL, name, createDir(t, JetStreamStoreDir), "spoke",
-			fmt.Sprintf("nats://y:p@127.0.0.1:%d", oA.LeafNode.Port),
-			fmt.Sprintf("nats://admin:s3cr3t!@127.0.0.1:%d", oA.LeafNode.Port))))
-		defer removeFile(t, confL)
-		sL, _ := RunServerWithConfig(confL)
-		defer sL.Shutdown()
-		checkLeafNodeConnectedCount(t, sL, 2)
-		checkLeafNodeConnectedCount(t, sA, 2)
-		// ensure sA contains only sA.ID
-		test(sA, sA.ID(), sA, sL)
-	})
-}
-
-func TestLeafNodeJwtPermsAndJetStreamDomains(t *testing.T) {
-	createAcc := func(js bool) (string, string, nkeys.KeyPair) {
-		kp, _ := nkeys.CreateAccount()
-		aPub, _ := kp.PublicKey()
-		claim := jwt.NewAccountClaims(aPub)
-		if js {
-			claim.Limits.JetStreamLimits = jwt.JetStreamLimits{
-				MemoryStorage: 1024 * 1024,
-				DiskStorage:   1024 * 1024,
-				Streams:       1, Consumer: 2}
-		}
-		aJwt, err := claim.Encode(oKp)
-		require_NoError(t, err)
-		return aPub, aJwt, kp
-	}
-	sysPub, sysJwt, sysKp := createAcc(false)
-	accPub, accJwt, accKp := createAcc(true)
-	noExpiration := time.Now().Add(time.Hour)
-	// create user for acc to be used in leaf node.
-	lnCreds := createUserWithLimit(t, accKp, noExpiration, func(j *jwt.UserPermissionLimits) {
-		j.Sub.Deny.Add("subdeny")
-		j.Pub.Deny.Add("pubdeny")
-	})
-	defer removeFile(t, lnCreds)
-	unlimitedCreds := createUserWithLimit(t, accKp, noExpiration, nil)
-	defer removeFile(t, unlimitedCreds)
-
-	sysCreds := createUserWithLimit(t, sysKp, noExpiration, nil)
-	defer removeFile(t, sysCreds)
-
-	tmplA := `
-operator: %s
-system_account: %s
-resolver: MEMORY
-resolver_preload: {
-  %s: %s
-  %s: %s
-}
-listen: 127.0.0.1:-1
-leafnodes: {
-	listen: 127.0.0.1:-1
-}
-jetstream :{
-    domain: "cluster"
-    store_dir: "%s"
-    max_mem: 100Mb
-    max_file: 100Mb
-}
-`
-
-	tmplL := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account = SYS
-jetstream: {
-    domain: ln1
-    store_dir: %s
-    max_mem: 50Mb
-    max_file: 50Mb
-}
-leafnodes:{
-    remotes:[{ url:nats://127.0.0.1:%d, account: A, credentials: %s},
-			 { url:nats://127.0.0.1:%d, account: SYS, credentials: %s}]
-}
-`
-
-	confA := createConfFile(t, []byte(fmt.Sprintf(tmplA, ojwt, sysPub,
-		sysPub, sysJwt, accPub, accJwt,
-		createDir(t, JetStreamStoreDir))))
-	defer removeFile(t, confA)
-	sA, _ := RunServerWithConfig(confA)
-	defer sA.Shutdown()
-
-	confL := createConfFile(t, []byte(fmt.Sprintf(tmplL, createDir(t, JetStreamStoreDir),
-		sA.opts.LeafNode.Port, lnCreds, sA.opts.LeafNode.Port, sysCreds)))
-	defer removeFile(t, confL)
-	sL, _ := RunServerWithConfig(confL)
-	defer sL.Shutdown()
-
-	checkLeafNodeConnectedCount(t, sA, 2)
-	checkLeafNodeConnectedCount(t, sL, 2)
-
-	ncA := natsConnect(t, sA.ClientURL(), nats.UserCredentials(unlimitedCreds))
-	defer ncA.Close()
-
-	ncL := natsConnect(t, fmt.Sprintf("nats://a1:a1@127.0.0.1:%d", sL.opts.Port))
-	defer ncL.Close()
-
-	test := func(subject string, cSub, cPub *nats.Conn, remoteServerForSub *Server, accName string, pass bool) {
-		t.Helper()
-		sub, err := cSub.SubscribeSync(subject)
-		require_NoError(t, err)
-		require_NoError(t, cSub.Flush())
-		// ensure the subscription made it across, or if not sent due to sub deny, make sure it could have made it.
-		if remoteServerForSub == nil {
-			time.Sleep(200 * time.Millisecond)
-		} else {
-			checkSubInterest(t, remoteServerForSub, accName, subject, time.Second)
-		}
-		require_NoError(t, cPub.Publish(subject, []byte("hello world")))
-		require_NoError(t, cPub.Flush())
-		m, err := sub.NextMsg(500 * time.Millisecond)
-		if pass {
-			require_NoError(t, err)
-			require_True(t, m.Subject == subject)
-			require_Equal(t, string(m.Data), "hello world")
-		} else {
-			require_True(t, err == nats.ErrTimeout)
-		}
-	}
-
-	t.Run("sub-on-ln-pass", func(t *testing.T) {
-		test("sub", ncL, ncA, sA, accPub, true)
-	})
-	t.Run("sub-on-ln-fail", func(t *testing.T) {
-		test("subdeny", ncL, ncA, nil, "", false)
-	})
-	t.Run("pub-on-ln-pass", func(t *testing.T) {
-		test("pub", ncA, ncL, sL, "A", true)
-	})
-	t.Run("pub-on-ln-fail", func(t *testing.T) {
-		test("pubdeny", ncA, ncL, nil, "A", false)
-	})
-}
-
 func TestLeafNodeInterestPropagationDaisychain(t *testing.T) {
 	aTmpl := `
 		port: %d
@@ -4100,948 +3885,620 @@ func TestLeafNodeInterestPropagationDaisychain(t *testing.T) {
 	checkSubInterest(t, sAA, "$G", "foo", time.Second) // failure issue 2448
 }
 
-func TestLeafNodeJetStreamClusterExtensionWithSystemAccount(t *testing.T) {
+func TestLeafNodeQueueGroupWithLateLNJoin(t *testing.T) {
 	/*
-		Topologies tested here
-		same == true
-		A  <-> B
-		^ |\
-		|   \
-		|  proxy
-		|     \
-		LA <-> LB
 
-		same == false
-		A  <-> B
-		^      ^
-		|      |
-		|    proxy
-		|      |
-		LA <-> LB
+		Topology: A cluster of leafnodes LN2 and LN3, connect
+		to a cluster C1, C2.
 
-		The proxy is turned on later, such that the system account connection can be started later, in a controlled way
-		This explicitly tests the system state before and after this happens.
+		sub(foo)     sub(foo)
+		    \         /
+		    C1  <->  C2
+		    ^        ^
+		    |        |
+		    LN2 <-> LN3
+		    /         \
+		sub(foo)     sub(foo)
+
+		Once the above is set, start LN1 that connects to C1.
+
+		    sub(foo)     sub(foo)
+		        \         /
+		LN1 ->  C1  <->  C2
+		        ^        ^
+		        |        |
+		        LN2 <-> LN3
+		        /         \
+		    sub(foo)     sub(foo)
+
+		Remove subs to LN3, C2 and C1.
+
+		LN1 ->  C1  <->  C2
+		        ^        ^
+		        |        |
+		        LN2 <-> LN3
+		        /
+		    sub(foo)
+
+		Publish from LN1 and verify message is received by sub on LN2.
+
+		pub(foo)
+		\
+		LN1 -> C1  <->  C2
+		        ^        ^
+		        |        |
+		        LN2 <-> LN3
+		        /
+		    sub(foo)
 	*/
+	co1 := DefaultOptions()
+	co1.LeafNode.Host = "127.0.0.1"
+	co1.LeafNode.Port = -1
+	co1.Cluster.Name = "ngs"
+	co1.Cluster.Host = "127.0.0.1"
+	co1.Cluster.Port = -1
+	c1 := RunServer(co1)
+	defer c1.Shutdown()
 
-	tmplA := `
-listen: 127.0.0.1:-1
+	co2 := DefaultOptions()
+	co2.LeafNode.Host = "127.0.0.1"
+	co2.LeafNode.Port = -1
+	co2.Cluster.Name = "ngs"
+	co2.Cluster.Host = "127.0.0.1"
+	co2.Cluster.Port = -1
+	co2.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", co1.Cluster.Port))
+	c2 := RunServer(co2)
+	defer c2.Shutdown()
+
+	checkClusterFormed(t, c1, c2)
+
+	lo2 := DefaultOptions()
+	lo2.Cluster.Name = "local"
+	lo2.Cluster.Host = "127.0.0.1"
+	lo2.Cluster.Port = -1
+	lo2.LeafNode.ReconnectInterval = 50 * time.Millisecond
+	lo2.LeafNode.Remotes = []*RemoteLeafOpts{{URLs: []*url.URL{{Scheme: "nats", Host: fmt.Sprintf("127.0.0.1:%d", co1.LeafNode.Port)}}}}
+	ln2 := RunServer(lo2)
+	defer ln2.Shutdown()
+
+	lo3 := DefaultOptions()
+	lo3.Cluster.Name = "local"
+	lo3.Cluster.Host = "127.0.0.1"
+	lo3.Cluster.Port = -1
+	lo3.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", lo2.Cluster.Port))
+	lo3.LeafNode.ReconnectInterval = 50 * time.Millisecond
+	lo3.LeafNode.Remotes = []*RemoteLeafOpts{{URLs: []*url.URL{{Scheme: "nats", Host: fmt.Sprintf("127.0.0.1:%d", co2.LeafNode.Port)}}}}
+	ln3 := RunServer(lo3)
+	defer ln3.Shutdown()
+
+	checkClusterFormed(t, ln2, ln3)
+	checkLeafNodeConnected(t, ln2)
+	checkLeafNodeConnected(t, ln3)
+
+	cln2 := natsConnect(t, ln2.ClientURL())
+	defer cln2.Close()
+	sln2 := natsQueueSubSync(t, cln2, "foo", "qgroup")
+	natsFlush(t, cln2)
+
+	cln3 := natsConnect(t, ln3.ClientURL())
+	defer cln3.Close()
+	sln3 := natsQueueSubSync(t, cln3, "foo", "qgroup")
+	natsFlush(t, cln3)
+
+	cc1 := natsConnect(t, c1.ClientURL())
+	defer cc1.Close()
+	sc1 := natsQueueSubSync(t, cc1, "foo", "qgroup")
+	natsFlush(t, cc1)
+
+	cc2 := natsConnect(t, c2.ClientURL())
+	defer cc2.Close()
+	sc2 := natsQueueSubSync(t, cc2, "foo", "qgroup")
+	natsFlush(t, cc2)
+
+	checkSubInterest(t, c1, globalAccountName, "foo", time.Second)
+	checkSubInterest(t, c2, globalAccountName, "foo", time.Second)
+	checkSubInterest(t, ln2, globalAccountName, "foo", time.Second)
+	checkSubInterest(t, ln3, globalAccountName, "foo", time.Second)
+
+	lo1 := DefaultOptions()
+	lo1.LeafNode.ReconnectInterval = 50 * time.Millisecond
+	lo1.LeafNode.Remotes = []*RemoteLeafOpts{{URLs: []*url.URL{{Scheme: "nats", Host: fmt.Sprintf("127.0.0.1:%d", co1.LeafNode.Port)}}}}
+	ln1 := RunServer(lo1)
+	defer ln1.Shutdown()
+
+	checkLeafNodeConnected(t, ln1)
+	checkSubInterest(t, ln1, globalAccountName, "foo", time.Second)
+
+	sln3.Unsubscribe()
+	natsFlush(t, cln3)
+	sc2.Unsubscribe()
+	natsFlush(t, cc2)
+	sc1.Unsubscribe()
+	natsFlush(t, cc1)
+
+	cln1 := natsConnect(t, ln1.ClientURL())
+	defer cln1.Close()
+
+	natsPub(t, cln1, "foo", []byte("hello"))
+	natsNexMsg(t, sln2, time.Second)
+}
+
+func TestLeafNodeJetStreamDomainMapCrossTalk(t *testing.T) {
+	accs := `
 accounts :{
     A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
     SYS:{ users:[ {user:s1,password:s1}]},
 }
 system_account: SYS
-leafnodes: {
-	listen: 127.0.0.1:-1
-	no_advertise: true
-	authorization: {
-		timeout: 0.5
-	}
-}
-jetstream :{
-    domain: "cluster"
-    store_dir: "%s"
-    max_mem: 100Mb
-    max_file: 100Mb
-}
-server_name: A
-cluster: {
-	name: clust1
-	listen: 127.0.0.1:50554
-	routes=[nats-route://127.0.0.1:50555]
-	no_advertise: true
-}
-`
-
-	tmplB := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account: SYS
-leafnodes: {
-	listen: 127.0.0.1:-1
-	no_advertise: true
-	authorization: {
-		timeout: 0.5
-	}
-}
-jetstream: {
-    domain: "cluster"
-    store_dir: "%s"
-    max_mem: 100Mb
-    max_file: 100Mb
-}
-server_name: B
-cluster: {
-	name: clust1
-	listen: 127.0.0.1:50555
-	routes=[nats-route://127.0.0.1:50554]
-	no_advertise: true
-}
-`
-
-	tmplLA := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account = SYS
-jetstream: {
-    domain: "cluster"
-    store_dir: %s
-    max_mem: 50Mb
-    max_file: 50Mb
-	%s
-}
-server_name: LA
-cluster: {
-	name: clustL
-	listen: 127.0.0.1:50556
-	routes=[nats-route://127.0.0.1:50557]
-	no_advertise: true
-}
-leafnodes:{
-	no_advertise: true
-    remotes:[{url:nats://a1:a1@127.0.0.1:%d, account: A},
-		     {url:nats://s1:s1@127.0.0.1:%d, account: SYS}]
-}
-`
-
-	tmplLB := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account = SYS
-jetstream: {
-    domain: "cluster"
-    store_dir: %s
-    max_mem: 50Mb
-    max_file: 50Mb
-	%s
-}
-server_name: LB
-cluster: {
-	name: clustL
-	listen: 127.0.0.1:50557
-	routes=[nats-route://127.0.0.1:50556]
-	no_advertise: true
-}
-leafnodes:{
-	no_advertise: true
-    remotes:[{url:nats://a1:a1@127.0.0.1:%d, account: A},
-		     {url:nats://s1:s1@127.0.0.1:%d, account: SYS}]
-}
-`
-
-	for _, testCase := range []struct {
-		// which topology to pick
-		same bool
-		// If leaf server should be operational and form a Js cluster prior to joining.
-		// In this setup this would be an error as you give the wrong hint.
-		// But this should work itself out regardless
-		leafFunctionPreJoin bool
-	}{
-		{true, true},
-		{true, false},
-		{false, true},
-		{false, false}} {
-		t.Run(fmt.Sprintf("%t-%t", testCase.same, testCase.leafFunctionPreJoin), func(t *testing.T) {
-			sd1 := createDir(t, JetStreamStoreDir)
-			defer os.RemoveAll(sd1)
-			confA := createConfFile(t, []byte(fmt.Sprintf(tmplA, sd1)))
-			defer removeFile(t, confA)
-			sA, _ := RunServerWithConfig(confA)
-			defer sA.Shutdown()
-
-			sd2 := createDir(t, JetStreamStoreDir)
-			defer os.RemoveAll(sd2)
-			confB := createConfFile(t, []byte(fmt.Sprintf(tmplB, sd2)))
-			defer removeFile(t, confB)
-			sB, _ := RunServerWithConfig(confB)
-			defer sB.Shutdown()
-
-			checkClusterFormed(t, sA, sB)
-
-			c := cluster{t: t, servers: []*Server{sA, sB}}
-			c.waitOnLeader()
-
-			// starting this will allow the second remote in tmplL to successfully connect.
-			port := sB.opts.LeafNode.Port
-			if testCase.same {
-				port = sA.opts.LeafNode.Port
-			}
-			p := &proxyAcceptDetectFailureLate{acceptPort: port}
-			defer p.close()
-			lPort := p.runEx(t, true)
-
-			hint := ""
-			if testCase.leafFunctionPreJoin {
-				hint = fmt.Sprintf("extension_hint: %s", strings.ToUpper(jsNoExtend))
-			}
-
-			sd3 := createDir(t, JetStreamStoreDir)
-			defer os.RemoveAll(sd3)
-			// deliberately pick server sA and proxy
-			confLA := createConfFile(t, []byte(fmt.Sprintf(tmplLA, sd3, hint, sA.opts.LeafNode.Port, lPort)))
-			defer removeFile(t, confLA)
-			sLA, _ := RunServerWithConfig(confLA)
-			defer sLA.Shutdown()
-
-			sd4 := createDir(t, JetStreamStoreDir)
-			defer os.RemoveAll(sd4)
-			// deliberately pick server sA and proxy
-			confLB := createConfFile(t, []byte(fmt.Sprintf(tmplLB, sd4, hint, sA.opts.LeafNode.Port, lPort)))
-			defer removeFile(t, confLB)
-			sLB, _ := RunServerWithConfig(confLB)
-			defer sLB.Shutdown()
-
-			checkClusterFormed(t, sLA, sLB)
-
-			strmCfg := func(name, placementCluster string) *nats.StreamConfig {
-				if placementCluster == "" {
-					return &nats.StreamConfig{Name: name, Replicas: 1, Subjects: []string{name}}
-				}
-				return &nats.StreamConfig{Name: name, Replicas: 1, Subjects: []string{name},
-					Placement: &nats.Placement{Cluster: placementCluster}}
-			}
-			// Only after the system account is fully connected can streams be placed anywhere.
-			testJSFunctions := func(pass bool) {
-				ncA := natsConnect(t, fmt.Sprintf("nats://a1:a1@127.0.0.1:%d", sA.opts.Port))
-				defer ncA.Close()
-				jsA, err := ncA.JetStream()
-				require_NoError(t, err)
-				_, err = jsA.AddStream(strmCfg(fmt.Sprintf("fooA1-%t", pass), ""))
-				require_NoError(t, err)
-				_, err = jsA.AddStream(strmCfg(fmt.Sprintf("fooA2-%t", pass), "clust1"))
-				require_NoError(t, err)
-				_, err = jsA.AddStream(strmCfg(fmt.Sprintf("fooA3-%t", pass), "clustL"))
-				if pass {
-					require_NoError(t, err)
-				} else {
-					require_Error(t, err)
-					require_Contains(t, err.Error(), "insufficient resources")
-				}
-				ncL := natsConnect(t, fmt.Sprintf("nats://a1:a1@127.0.0.1:%d", sLA.opts.Port))
-				defer ncL.Close()
-				jsL, err := ncL.JetStream()
-				require_NoError(t, err)
-				_, err = jsL.AddStream(strmCfg(fmt.Sprintf("fooL1-%t", pass), ""))
-				require_NoError(t, err)
-				_, err = jsL.AddStream(strmCfg(fmt.Sprintf("fooL2-%t", pass), "clustL"))
-				require_NoError(t, err)
-				_, err = jsL.AddStream(strmCfg(fmt.Sprintf("fooL3-%t", pass), "clust1"))
-				if pass {
-					require_NoError(t, err)
-				} else {
-					require_Error(t, err)
-					require_Contains(t, err.Error(), "insufficient resources")
-				}
-			}
-			clusterLnCnt := func(expected int) error {
-				cnt := 0
-				for _, s := range c.servers {
-					cnt += s.NumLeafNodes()
-				}
-				if cnt == expected {
-					return nil
-				}
-				return fmt.Errorf("not enought leaf node connections, got %d needed %d", cnt, expected)
-			}
-
-			// Even though there are two remotes defined in tmplL, only one will be able to connect.
-			checkFor(t, 10*time.Second, time.Second/4, func() error { return clusterLnCnt(2) })
-			checkLeafNodeConnectedCount(t, sLA, 1)
-			checkLeafNodeConnectedCount(t, sLB, 1)
-			c.waitOnPeerCount(2)
-
-			if testCase.leafFunctionPreJoin {
-				cl := cluster{t: t, servers: []*Server{sLA, sLB}}
-				cl.waitOnLeader()
-				cl.waitOnPeerCount(2)
-				testJSFunctions(false)
-			} else {
-				// In cases where the leaf nodes have to wait for the system account to connect,
-				// JetStream should not be operational during that time
-				ncA := natsConnect(t, fmt.Sprintf("nats://a1:a1@127.0.0.1:%d", sLA.opts.Port))
-				defer ncA.Close()
-				jsA, err := ncA.JetStream()
-				require_NoError(t, err)
-				_, err = jsA.AddStream(strmCfg("fail-false", ""))
-				require_Error(t, err)
-			}
-			// Starting the proxy will connect the system accounts.
-			// After they are connected the clusters are merged.
-			// Once this happened, all streams in test can be placed anywhere in the cluster.
-			// Before that only the cluster the client is connected to can be used for placement
-			p.start()
-
-			// Even though there are two remotes defined in tmplL, only one will be able to connect.
-			checkFor(t, 10*time.Second, time.Second/4, func() error { return clusterLnCnt(4) })
-			checkLeafNodeConnectedCount(t, sLA, 2)
-			checkLeafNodeConnectedCount(t, sLB, 2)
-
-			// The leader will reside in the main cluster only
-			c.waitOnPeerCount(4)
-			testJSFunctions(true)
-		})
-	}
-}
-
-func TestLeafNodeJetStreamClusterMixedModeExtensionWithSystemAccount(t *testing.T) {
-	/*  Topology used in this test:
-	CLUSTER(A <-> B <-> C (NO JS))
-	      	            ^
-	                    |
-	                    LA
-	*/
-
-	// once every server is up, we expect these peers to be part of the JetStream meta cluster
-	expectedJetStreamPeers := map[string]struct{}{
-		"A":  {},
-		"B":  {},
-		"LA": {},
-	}
-
-	tmplA := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account: SYS
-leafnodes: {
-	listen: 127.0.0.1:-1
-	no_advertise: true
-	authorization: {
-		timeout: 0.5
-	}
-}
-jetstream: { %s store_dir: %s; max_mem: 50Mb, max_file: 50Mb }
-server_name: A
-cluster: {
-	name: clust1
-	listen: 127.0.0.1:50554
-	routes=[nats-route://127.0.0.1:50555,nats-route://127.0.0.1:50556]
-	no_advertise: true
-}
-`
-
-	tmplB := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account: SYS
-leafnodes: {
-	listen: 127.0.0.1:-1
-	no_advertise: true
-	authorization: {
-		timeout: 0.5
-	}
-}
-jetstream: { %s store_dir: %s; max_mem: 50Mb, max_file: 50Mb }
-server_name: B
-cluster: {
-	name: clust1
-	listen: 127.0.0.1:50555
-	routes=[nats-route://127.0.0.1:50554,nats-route://127.0.0.1:50556]
-	no_advertise: true
-}
-`
-
-	tmplC := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account: SYS
-leafnodes: {
-	listen: 127.0.0.1:-1
-	no_advertise: true
-	authorization: {
-		timeout: 0.5
-	}
-}
-jetstream: {
-	enabled: false
-	%s
-}
-server_name: C
-cluster: {
-	name: clust1
-	listen: 127.0.0.1:50556
-	routes=[nats-route://127.0.0.1:50554,nats-route://127.0.0.1:50555]
-	no_advertise: true
-}
-`
-
-	tmplLA := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account = SYS
-# the extension hint is to simplify this test. without it present we would need a cluster of size 2
-jetstream: { %s store_dir: %s; max_mem: 50Mb, max_file: 50Mb, extension_hint: will_extend }
-server_name: LA
-leafnodes:{
-	no_advertise: true
-    remotes:[{url:nats://a1:a1@127.0.0.1:%d, account: A},
-		     {url:nats://s1:s1@127.0.0.1:%d, account: SYS}]
-}
-# add the cluster here so we can test placement
-cluster: { name: clustL }
-`
-	for _, withDomain := range []bool{true, false} {
-		t.Run(fmt.Sprintf("with-domain:%t", withDomain), func(t *testing.T) {
-			jsDisabledDomainString := _EMPTY_
-			jsEnabledDomainString := _EMPTY_
-			if withDomain {
-				jsEnabledDomainString = `domain: "domain", `
-				jsDisabledDomainString = `domain: "domain"`
-			} else {
-				// in case no domain name is set, fall back to the extension hint.
-				// since JS is disabled, the value of this does not clash with other uses.
-				jsDisabledDomainString = "extension_hint: will_extend"
-			}
-
-			sd1 := createDir(t, JetStreamStoreDir)
-			defer os.RemoveAll(sd1)
-			confA := createConfFile(t, []byte(fmt.Sprintf(tmplA, jsEnabledDomainString, sd1)))
-			defer removeFile(t, confA)
-			sA, _ := RunServerWithConfig(confA)
-			defer sA.Shutdown()
-
-			sd2 := createDir(t, JetStreamStoreDir)
-			defer os.RemoveAll(sd2)
-			confB := createConfFile(t, []byte(fmt.Sprintf(tmplB, jsEnabledDomainString, sd2)))
-			defer removeFile(t, confB)
-			sB, _ := RunServerWithConfig(confB)
-			defer sB.Shutdown()
-
-			confC := createConfFile(t, []byte(fmt.Sprintf(tmplC, jsDisabledDomainString)))
-			defer removeFile(t, confC)
-			sC, _ := RunServerWithConfig(confC)
-			defer sC.Shutdown()
-
-			checkClusterFormed(t, sA, sB, sC)
-			c := cluster{t: t, servers: []*Server{sA, sB, sC}}
-			c.waitOnPeerCount(2)
-
-			sd3 := createDir(t, JetStreamStoreDir)
-			defer os.RemoveAll(sd3)
-			// deliberately pick server sC (no JS) to connect to
-			confLA := createConfFile(t, []byte(fmt.Sprintf(tmplLA, jsEnabledDomainString, sd3, sC.opts.LeafNode.Port, sC.opts.LeafNode.Port)))
-			defer removeFile(t, confLA)
-			sLA, _ := RunServerWithConfig(confLA)
-			defer sLA.Shutdown()
-
-			checkLeafNodeConnectedCount(t, sC, 2)
-			checkLeafNodeConnectedCount(t, sLA, 2)
-			c.waitOnPeerCount(3)
-			peers := c.leader().JetStreamClusterPeers()
-			for _, peer := range peers {
-				if _, ok := expectedJetStreamPeers[peer]; !ok {
-					t.Fatalf("Found unexpected peer %q", peer)
-				}
-			}
-
-			// helper to create stream config with uniqe name and subject
-			cnt := 0
-			strmCfg := func(placementCluster string) *nats.StreamConfig {
-				name := fmt.Sprintf("s-%d", cnt)
-				cnt++
-				if placementCluster == "" {
-					return &nats.StreamConfig{Name: name, Replicas: 1, Subjects: []string{name}}
-				}
-				return &nats.StreamConfig{Name: name, Replicas: 1, Subjects: []string{name},
-					Placement: &nats.Placement{Cluster: placementCluster}}
-			}
-
-			test := func(port int, expectedDefPlacement string) {
-				ncA := natsConnect(t, fmt.Sprintf("nats://a1:a1@127.0.0.1:%d", port))
-				defer ncA.Close()
-				jsA, err := ncA.JetStream()
-				require_NoError(t, err)
-				si, err := jsA.AddStream(strmCfg(""))
-				require_NoError(t, err)
-				require_Contains(t, si.Cluster.Name, expectedDefPlacement)
-				si, err = jsA.AddStream(strmCfg("clust1"))
-				require_NoError(t, err)
-				require_Contains(t, si.Cluster.Name, "clust1")
-				si, err = jsA.AddStream(strmCfg("clustL"))
-				require_NoError(t, err)
-				require_Contains(t, si.Cluster.Name, "clustL")
-			}
-
-			test(sA.opts.Port, "clust1")
-			test(sB.opts.Port, "clust1")
-			test(sC.opts.Port, "clust1")
-			test(sLA.opts.Port, "clustL")
-		})
-	}
-}
-
-func TestLeafNodeJetStreamCredsDenies(t *testing.T) {
-	tmplL := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account = SYS
-jetstream: {
-    domain: "cluster"
-    store_dir: %s
-    max_mem: 50Mb
-    max_file: 50Mb
-}
-leafnodes:{
-    remotes:[{url:nats://a1:a1@127.0.0.1:50555, account: A, credentials: %s },
-		     {url:nats://s1:s1@127.0.0.1:50555, account: SYS, credentials: %s, deny_imports: foo, deny_exports: bar}]
-}
-`
-	akp, err := nkeys.CreateAccount()
-	require_NoError(t, err)
-	creds := createUserWithLimit(t, akp, time.Time{}, func(pl *jwt.UserPermissionLimits) {
-		pl.Pub.Deny.Add(jsAllAPI)
-		pl.Sub.Deny.Add(jsAllAPI)
-	})
-
-	sd := createDir(t, JetStreamStoreDir)
-	defer os.RemoveAll(sd)
-
-	confL := createConfFile(t, []byte(fmt.Sprintf(tmplL, sd, creds, creds)))
-	defer removeFile(t, confL)
-	opts := LoadConfig(confL)
-	sL, err := NewServer(opts)
-	require_NoError(t, err)
-
-	l := captureNoticeLogger{}
-	sL.SetLogger(&l, false, false)
-
-	go sL.Start()
-	defer sL.Shutdown()
-
-	// wait till the notices got printed
-UNTIL_READY:
-	for {
-		<-time.After(50 * time.Millisecond)
-		l.Lock()
-		for _, n := range l.notices {
-			if strings.Contains(n, "Server is ready") {
-				l.Unlock()
-				break UNTIL_READY
-			}
-		}
-		l.Unlock()
-	}
-
-	l.Lock()
-	cnt := 0
-	for _, n := range l.notices {
-		if strings.Contains(n, "LeafNode Remote for Account A uses credentials file") ||
-			strings.Contains(n, "LeafNode Remote for System Account uses") ||
-			strings.Contains(n, "Remote for System Account uses restricted export permissions") ||
-			strings.Contains(n, "Remote for System Account uses restricted import permissions") {
-			cnt++
-		}
-	}
-	l.Unlock()
-	require_True(t, cnt == 4)
-}
-
-func TestLeafNodeJetStreamDefaultDomainCfg(t *testing.T) {
-	tmplHub := `
-listen: 127.0.0.1:%d
-accounts :{
-    A:{ jetstream: %s, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account: SYS
-jetstream : %s
-server_name: HUB
-leafnodes: {
-	listen: 127.0.0.1:%d
-}
-%s
-`
-
-	tmplL := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account: SYS
-jetstream: { domain: "%s", store_dir: "%s", max_mem: 100Mb, max_file: 100Mb }
-server_name: LEAF
-leafnodes: {
-    remotes:[{url:nats://a1:a1@127.0.0.1:%d, account: A},%s]
-}
-%s
-`
-
-	test := func(domain string, sysShared bool) {
-		confHub := createConfFile(t, []byte(fmt.Sprintf(tmplHub, -1, "disabled", "disabled", -1, "")))
-		defer removeFile(t, confHub)
-		sHub, _ := RunServerWithConfig(confHub)
-		defer sHub.Shutdown()
-
-		noDomainFix := ""
-		if domain == _EMPTY_ {
-			noDomainFix = `default_js_domain:{A:""}`
-		}
-
-		sys := ""
-		if sysShared {
-			sys = fmt.Sprintf(`{url:nats://s1:s1@127.0.0.1:%d, account: SYS}`, sHub.opts.LeafNode.Port)
-		}
-
-		sdLeaf := createDir(t, JetStreamStoreDir)
-		defer os.RemoveAll(sdLeaf)
-		confL := createConfFile(t, []byte(fmt.Sprintf(tmplL, domain, sdLeaf, sHub.opts.LeafNode.Port, sys, noDomainFix)))
-		defer removeFile(t, confL)
-		sLeaf, _ := RunServerWithConfig(confL)
-		defer sLeaf.Shutdown()
-
-		lnCnt := 1
-		if sysShared {
-			lnCnt++
-		}
-
-		checkLeafNodeConnectedCount(t, sHub, lnCnt)
-		checkLeafNodeConnectedCount(t, sLeaf, lnCnt)
-
-		ncA := natsConnect(t, fmt.Sprintf("nats://a1:a1@127.0.0.1:%d", sHub.opts.Port))
-		defer ncA.Close()
-		jsA, err := ncA.JetStream()
-		require_NoError(t, err)
-
-		_, err = jsA.AddStream(&nats.StreamConfig{Name: "foo", Replicas: 1, Subjects: []string{"foo"}})
-		require_True(t, err == nats.ErrNoResponders)
-
-		// Add in default domain and restart server
-		require_NoError(t, ioutil.WriteFile(confHub, []byte(fmt.Sprintf(tmplHub,
-			sHub.opts.Port,
-			"disabled",
-			"disabled",
-			sHub.opts.LeafNode.Port,
-			fmt.Sprintf(`default_js_domain: {A:"%s"}`, domain))), 0664))
-
-		sHub.Shutdown()
-		sHub.WaitForShutdown()
-		checkLeafNodeConnectedCount(t, sLeaf, 0)
-		sHubUpd1, _ := RunServerWithConfig(confHub)
-		defer sHubUpd1.Shutdown()
-
-		checkLeafNodeConnectedCount(t, sHubUpd1, lnCnt)
-		checkLeafNodeConnectedCount(t, sLeaf, lnCnt)
-
-		_, err = jsA.AddStream(&nats.StreamConfig{Name: "foo", Replicas: 1, Subjects: []string{"foo"}})
-		require_NoError(t, err)
-
-		// Enable jetstream in hub.
-		sdHub := createDir(t, JetStreamStoreDir)
-		defer os.RemoveAll(sdHub)
-		jsEnabled := fmt.Sprintf(`{ domain: "%s", store_dir: "%s", max_mem: 100Mb, max_file: 100Mb }`, domain, sdHub)
-		require_NoError(t, ioutil.WriteFile(confHub, []byte(fmt.Sprintf(tmplHub,
-			sHubUpd1.opts.Port,
-			"disabled",
-			jsEnabled,
-			sHubUpd1.opts.LeafNode.Port,
-			fmt.Sprintf(`default_js_domain: {A:"%s"}`, domain))), 0664))
-
-		sHubUpd1.Shutdown()
-		sHubUpd1.WaitForShutdown()
-		checkLeafNodeConnectedCount(t, sLeaf, 0)
-		sHubUpd2, _ := RunServerWithConfig(confHub)
-		defer sHubUpd2.Shutdown()
-
-		checkLeafNodeConnectedCount(t, sHubUpd2, lnCnt)
-		checkLeafNodeConnectedCount(t, sLeaf, lnCnt)
-
-		_, err = jsA.AddStream(&nats.StreamConfig{Name: "bar", Replicas: 1, Subjects: []string{"bar"}})
-		require_NoError(t, err)
-
-		// Enable jetstream in account A of hub
-		// This is a mis config, as you can't have it both ways, local jetstream but default to another one
-		require_NoError(t, ioutil.WriteFile(confHub, []byte(fmt.Sprintf(tmplHub,
-			sHubUpd2.opts.Port,
-			"enabled",
-			jsEnabled,
-			sHubUpd2.opts.LeafNode.Port,
-			fmt.Sprintf(`default_js_domain: {A:"%s"}`, domain))), 0664))
-
-		if domain != _EMPTY_ {
-			// in case no domain name exists there are no additional guard rails, hence no error
-			// It is the users responsibility to get this edge case right
-			sHubUpd2.Shutdown()
-			sHubUpd2.WaitForShutdown()
-			checkLeafNodeConnectedCount(t, sLeaf, 0)
-			sHubUpd3, err := NewServer(LoadConfig(confHub))
-			sHubUpd3.Shutdown()
-
-			require_Error(t, err)
-			require_Contains(t, err.Error(), `default_js_domain contains account name "A" with enabled JetStream`)
-		}
-	}
-
-	t.Run("with-domain-sys", func(t *testing.T) {
-		test("domain", true)
-	})
-	t.Run("with-domain-nosys", func(t *testing.T) {
-		test("domain", false)
-	})
-	t.Run("no-domain", func(t *testing.T) {
-		test("", true)
-	})
-	t.Run("no-domain", func(t *testing.T) {
-		test("", false)
-	})
-}
-
-func TestLeafNodeJetStreamDefaultDomainJwtExplicit(t *testing.T) {
-	tmplHub := `
-listen: 127.0.0.1:%d
-operator: %s
-system_account: %s
-resolver: MEM
-resolver_preload: {
-	%s:%s
-	%s:%s
-}
-jetstream : disabled
-server_name: HUB
-leafnodes: {
-	listen: 127.0.0.1:%d
-}
-%s
-`
-
-	tmplL := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{   jetstream: enable, users:[ {user:a1,password:a1}]},
-    SYS:{ users:[ {user:s1,password:s1}]},
-}
-system_account: SYS
-jetstream: { domain: "%s", store_dir: "%s", max_mem: 100Mb, max_file: 100Mb }
-server_name: LEAF
-leafnodes: {
-    remotes:[{url:nats://127.0.0.1:%d, account: A, credentials: %s},
-		     {url:nats://127.0.0.1:%d, account: SYS, credentials: %s}]
-}
-%s
-`
-
-	test := func(domain string) {
-		noDomainFix := ""
-		if domain == _EMPTY_ {
-			noDomainFix = `default_js_domain:{A:""}`
-		}
-
-		sysKp, syspub := createKey(t)
-		sysJwt := encodeClaim(t, jwt.NewAccountClaims(syspub), syspub)
-		sysCreds := newUser(t, sysKp)
-		defer removeFile(t, sysCreds)
-
-		aKp, aPub := createKey(t)
-		aClaim := jwt.NewAccountClaims(aPub)
-		aJwt := encodeClaim(t, aClaim, aPub)
-		aCreds := newUser(t, aKp)
-		defer removeFile(t, aCreds)
-
-		confHub := createConfFile(t, []byte(fmt.Sprintf(tmplHub, -1, ojwt, syspub, syspub, sysJwt, aPub, aJwt, -1, "")))
-		defer removeFile(t, confHub)
-		sHub, _ := RunServerWithConfig(confHub)
-		defer sHub.Shutdown()
-
-		sdLeaf := createDir(t, JetStreamStoreDir)
-		defer os.RemoveAll(sdLeaf)
-		confL := createConfFile(t, []byte(fmt.Sprintf(tmplL,
-			domain,
-			sdLeaf,
-			sHub.opts.LeafNode.Port,
-			aCreds,
-			sHub.opts.LeafNode.Port,
-			sysCreds,
-			noDomainFix)))
-		defer removeFile(t, confL)
-		sLeaf, _ := RunServerWithConfig(confL)
-		defer sLeaf.Shutdown()
-
-		checkLeafNodeConnectedCount(t, sHub, 2)
-		checkLeafNodeConnectedCount(t, sLeaf, 2)
-
-		ncA := natsConnect(t, fmt.Sprintf("nats://127.0.0.1:%d", sHub.opts.Port), createUserCreds(t, nil, aKp))
-		defer ncA.Close()
-		jsA, err := ncA.JetStream()
-		require_NoError(t, err)
-
-		_, err = jsA.AddStream(&nats.StreamConfig{Name: "foo", Replicas: 1, Subjects: []string{"foo"}})
-		require_True(t, err == nats.ErrNoResponders)
-
-		// Add in default domain and restart server
-		require_NoError(t, ioutil.WriteFile(confHub, []byte(fmt.Sprintf(tmplHub,
-			sHub.opts.Port, ojwt, syspub, syspub, sysJwt, aPub, aJwt, sHub.opts.LeafNode.Port,
-			fmt.Sprintf(`default_js_domain: {%s:"%s"}`, aPub, domain))), 0664))
-
-		sHub.Shutdown()
-		sHub.WaitForShutdown()
-		checkLeafNodeConnectedCount(t, sLeaf, 0)
-		sHubUpd1, _ := RunServerWithConfig(confHub)
-		defer sHubUpd1.Shutdown()
-
-		checkLeafNodeConnectedCount(t, sHubUpd1, 2)
-		checkLeafNodeConnectedCount(t, sLeaf, 2)
-
-		_, err = jsA.AddStream(&nats.StreamConfig{Name: "bar", Replicas: 1, Subjects: []string{"bar"}})
-		require_NoError(t, err)
-	}
-	t.Run("with-domain", func(t *testing.T) {
-		test("domain")
-	})
-	t.Run("no-domain", func(t *testing.T) {
-		test("")
-	})
-}
-
-func TestLeafNodeJetStreamDefaultDomainClusterBothEnds(t *testing.T) {
-	// test to ensure that default domain functions when both ends of the leaf node connection are clusters
-	tmplHub1 := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{ jetstream: enabled, users:[ {user:a1,password:a1}]},
-	B:{ jetstream: enabled, users:[ {user:b1,password:b1}]}
-}
-jetstream : { domain: "DHUB", store_dir: "%s", max_mem: 100Mb, max_file: 100Mb }
-server_name: HUB1
-cluster: {
-	name: HUB
-	listen: 127.0.0.1:50554
-	routes=[nats-route://127.0.0.1:50555]
-}
-leafnodes: {
-	listen:127.0.0.1:-1
-}
-`
-
-	tmplHub2 := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{ jetstream: enabled, users:[ {user:a1,password:a1}]},
-	B:{ jetstream: enabled, users:[ {user:b1,password:b1}]}
-}
-jetstream : { domain: "DHUB", store_dir: "%s", max_mem: 100Mb, max_file: 100Mb }
-server_name: HUB2
-cluster: {
-	name: HUB
-	listen: 127.0.0.1:50555
-	routes=[nats-route://127.0.0.1:50554]
-}
-leafnodes: {
-	listen:127.0.0.1:-1
-}
-`
-
-	tmplL1 := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{ jetstream: enabled,  users:[ {user:a1,password:a1}]},
-	B:{ jetstream: disabled, users:[ {user:b1,password:b1}]}
-}
-jetstream: { domain: "DLEAF", store_dir: "%s", max_mem: 100Mb, max_file: 100Mb }
-server_name: LEAF1
-cluster: {
-	name: LEAF
-	listen: 127.0.0.1:50556
-	routes=[nats-route://127.0.0.1:50557]
-}
-leafnodes: {
-    remotes:[{url:nats://a1:a1@127.0.0.1:%d, account: A},{url:nats://b1:b1@127.0.0.1:%d, account: B}]
-}
-default_js_domain: {B:"DHUB"}
-`
-
-	tmplL2 := `
-listen: 127.0.0.1:-1
-accounts :{
-    A:{ jetstream: enabled,  users:[ {user:a1,password:a1}]},
-	B:{ jetstream: disabled, users:[ {user:b1,password:b1}]}
-}
-jetstream: { domain: "DLEAF", store_dir: "%s", max_mem: 100Mb, max_file: 100Mb }
-server_name: LEAF2
-cluster: {
-	name: LEAF
-	listen: 127.0.0.1:50557
-	routes=[nats-route://127.0.0.1:50556]
-}
-leafnodes: {
-    remotes:[{url:nats://a1:a1@127.0.0.1:%d, account: A},{url:nats://b1:b1@127.0.0.1:%d, account: B}]
-}
-default_js_domain: {B:"DHUB"}
 `
 
 	sd1 := createDir(t, JetStreamStoreDir)
 	defer os.RemoveAll(sd1)
-	confHub1 := createConfFile(t, []byte(fmt.Sprintf(tmplHub1, sd1)))
-	defer removeFile(t, confHub1)
-	sHub1, _ := RunServerWithConfig(confHub1)
-	defer sHub1.Shutdown()
+	confA := createConfFile(t, []byte(fmt.Sprintf(`
+listen: 127.0.0.1:-1
+%s
+jetstream: { domain: da, store_dir: '%s', max_mem: 50Mb, max_file: 50Mb }
+leafnodes: {
+	listen: 127.0.0.1:-1
+	no_advertise: true
+	authorization: {
+		timeout: 0.5
+	}
+}
+`, accs, sd1)))
+	defer removeFile(t, confA)
+	sA, _ := RunServerWithConfig(confA)
+	defer sA.Shutdown()
 
 	sd2 := createDir(t, JetStreamStoreDir)
 	defer os.RemoveAll(sd2)
-	confHub2 := createConfFile(t, []byte(fmt.Sprintf(tmplHub2, sd2)))
-	defer removeFile(t, confHub2)
-	sHub2, _ := RunServerWithConfig(confHub2)
-	defer sHub2.Shutdown()
+	confL := createConfFile(t, []byte(fmt.Sprintf(`
+listen: 127.0.0.1:-1
+%s
+jetstream: { domain: dl, store_dir: '%s', max_mem: 50Mb, max_file: 50Mb }
+leafnodes:{
+	no_advertise: true
+    remotes:[{url:nats://a1:a1@127.0.0.1:%d, account: A},
+		     {url:nats://s1:s1@127.0.0.1:%d, account: SYS}]
+}
+`, accs, sd2, sA.opts.LeafNode.Port, sA.opts.LeafNode.Port)))
+	defer removeFile(t, confL)
+	sL, _ := RunServerWithConfig(confL)
+	defer sL.Shutdown()
 
-	checkClusterFormed(t, sHub1, sHub2)
-	c1 := cluster{t: t, servers: []*Server{sHub1, sHub2}}
-	c1.waitOnPeerCount(2)
+	ncA := natsConnect(t, sA.ClientURL(), nats.UserInfo("a1", "a1"))
+	defer ncA.Close()
+	ncL := natsConnect(t, sL.ClientURL(), nats.UserInfo("a1", "a1"))
+	defer ncL.Close()
 
-	sd3 := createDir(t, JetStreamStoreDir)
-	defer os.RemoveAll(sd3)
-	confLeaf1 := createConfFile(t, []byte(fmt.Sprintf(tmplL1, sd3, sHub1.getOpts().LeafNode.Port, sHub1.getOpts().LeafNode.Port)))
-	defer removeFile(t, confLeaf1)
-	sLeaf1, _ := RunServerWithConfig(confLeaf1)
-	defer sLeaf1.Shutdown()
+	test := func(jsA, jsL nats.JetStreamContext) {
+		kvA, err := jsA.CreateKeyValue(&nats.KeyValueConfig{Bucket: "bucket"})
+		require_NoError(t, err)
+		kvL, err := jsL.CreateKeyValue(&nats.KeyValueConfig{Bucket: "bucket"})
+		require_NoError(t, err)
 
-	sd4 := createDir(t, JetStreamStoreDir)
-	defer os.RemoveAll(sd4)
-	confLeaf2 := createConfFile(t, []byte(fmt.Sprintf(tmplL2, sd3, sHub1.getOpts().LeafNode.Port, sHub1.getOpts().LeafNode.Port)))
-	defer removeFile(t, confLeaf2)
-	sLeaf2, _ := RunServerWithConfig(confLeaf2)
-	defer sLeaf2.Shutdown()
+		_, err = kvA.Put("A", nil)
+		require_NoError(t, err)
+		_, err = kvL.Put("L", nil)
+		require_NoError(t, err)
 
-	checkClusterFormed(t, sLeaf1, sLeaf2)
-	c2 := cluster{t: t, servers: []*Server{sLeaf1, sLeaf2}}
-	c2.waitOnPeerCount(2)
+		// check for unwanted cross talk
+		_, err = kvA.Get("A")
+		require_NoError(t, err)
+		_, err = kvA.Get("l")
+		require_Error(t, err)
+		require_True(t, err == nats.ErrKeyNotFound)
 
-	checkLeafNodeConnectedCount(t, sHub1, 4)
-	checkLeafNodeConnectedCount(t, sLeaf1, 2)
-	checkLeafNodeConnectedCount(t, sLeaf2, 2)
+		_, err = kvL.Get("A")
+		require_Error(t, err)
+		require_True(t, err == nats.ErrKeyNotFound)
+		_, err = kvL.Get("L")
+		require_NoError(t, err)
 
-	ncB := natsConnect(t, fmt.Sprintf("nats://b1:b1@127.0.0.1:%d", sLeaf1.getOpts().Port))
-	defer ncB.Close()
-	jsB1, err := ncB.JetStream()
+		err = jsA.DeleteKeyValue("bucket")
+		require_NoError(t, err)
+		err = jsL.DeleteKeyValue("bucket")
+		require_NoError(t, err)
+	}
+
+	jsA, err := ncA.JetStream()
 	require_NoError(t, err)
-	si, err := jsB1.AddStream(&nats.StreamConfig{Name: "foo", Replicas: 1, Subjects: []string{"foo"}})
+	jsL, err := ncL.JetStream()
 	require_NoError(t, err)
-	require_Equal(t, si.Cluster.Name, "HUB")
+	test(jsA, jsL)
 
-	jsB2, err := ncB.JetStream(nats.Domain("DHUB"))
+	jsAL, err := ncA.JetStream(nats.Domain("dl"))
 	require_NoError(t, err)
-	si, err = jsB2.AddStream(&nats.StreamConfig{Name: "bar", Replicas: 1, Subjects: []string{"bar"}})
+	jsLA, err := ncL.JetStream(nats.Domain("da"))
 	require_NoError(t, err)
-	require_Equal(t, si.Cluster.Name, "HUB")
+	test(jsAL, jsLA)
 
+	jsAA, err := ncA.JetStream(nats.Domain("da"))
+	require_NoError(t, err)
+	jsLL, err := ncL.JetStream(nats.Domain("dl"))
+	require_NoError(t, err)
+	test(jsAA, jsLL)
+}
+
+type checkLeafMinVersionLogger struct {
+	DummyLogger
+	errCh  chan string
+	connCh chan string
+}
+
+func (l *checkLeafMinVersionLogger) Errorf(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if strings.Contains(msg, "minimum version") {
+		select {
+		case l.errCh <- msg:
+		default:
+		}
+	}
+}
+
+func (l *checkLeafMinVersionLogger) Noticef(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if strings.Contains(msg, "Leafnode connection created") {
+		select {
+		case l.connCh <- msg:
+		default:
+		}
+	}
+}
+
+func TestLeafNodeMinVersion(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		port: -1
+		leafnodes {
+			port: -1
+			min_version: 2.8.0
+		}
+	`))
+	defer removeFile(t, conf)
+	s, o := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	rconf := createConfFile(t, []byte(fmt.Sprintf(`
+		port: -1
+		leafnodes {
+			remotes [
+				{url: "nats://127.0.0.1:%d" }
+			]
+		}
+	`, o.LeafNode.Port)))
+	defer removeFile(t, rconf)
+	ln, _ := RunServerWithConfig(rconf)
+	defer ln.Shutdown()
+
+	checkLeafNodeConnected(t, s)
+	checkLeafNodeConnected(t, ln)
+
+	ln.Shutdown()
+	s.Shutdown()
+
+	// Now makes sure we validate options, not just config file.
+	for _, test := range []struct {
+		name    string
+		version string
+		err     string
+	}{
+		{"invalid version", "abc", "semver"},
+		{"version too low", "2.7.9", "the minimum version should be at least 2.8.0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			o.Port = -1
+			o.LeafNode.Port = -1
+			o.LeafNode.MinVersion = test.version
+			if s, err := NewServer(o); err == nil || !strings.Contains(err.Error(), test.err) {
+				if s != nil {
+					s.Shutdown()
+				}
+				t.Fatalf("Expected error to contain %q, got %v", test.err, err)
+			}
+		})
+	}
+
+	// Ok, so now to verify that a server rejects a leafnode connection
+	// we will set the min_version above our current VERSION. So first
+	// decompose the version:
+	major, minor, _, err := versionComponents(VERSION)
+	if err != nil {
+		t.Fatalf("The current server version %q is not valid: %v", VERSION, err)
+	}
+	// Let's make our minimum server an minor version above
+	mv := fmt.Sprintf("%d.%d.0", major, minor+1)
+	conf = createConfFile(t, []byte(fmt.Sprintf(`
+		port: -1
+		leafnodes {
+			port: -1
+			min_version: "%s"
+		}
+	`, mv)))
+	defer removeFile(t, conf)
+	s, o = RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	l := &checkLeafMinVersionLogger{errCh: make(chan string, 1), connCh: make(chan string, 1)}
+	s.SetLogger(l, false, false)
+
+	rconf = createConfFile(t, []byte(fmt.Sprintf(`
+		port: -1
+		leafnodes {
+			remotes [
+				{url: "nats://127.0.0.1:%d" }
+			]
+		}
+	`, o.LeafNode.Port)))
+	defer removeFile(t, rconf)
+	lo := LoadConfig(rconf)
+	lo.LeafNode.ReconnectInterval = 50 * time.Millisecond
+	ln = RunServer(lo)
+	defer ln.Shutdown()
+
+	select {
+	case <-l.connCh:
+	case <-time.After(time.Second):
+		t.Fatal("Remote did not try to connect")
+	}
+
+	select {
+	case <-l.errCh:
+	case <-time.After(time.Second):
+		t.Fatal("Did not get the minimum version required error")
+	}
+
+	// Since we have a very small reconnect interval, if the connection was
+	// closed "right away", then we should have had a reconnect attempt with
+	// another failure. This should not be the case because the server will
+	// wait 5s before closing the connection.
+	select {
+	case <-l.connCh:
+		t.Fatal("Should not have tried to reconnect")
+	case <-time.After(250 * time.Millisecond):
+		// OK
+	}
+}
+
+func TestLeafNodeStreamAndShadowSubs(t *testing.T) {
+	hubConf := createConfFile(t, []byte(`
+		port: -1
+		leafnodes {
+			port: -1
+			authorization: {
+			  user: leaf
+			  password: leaf
+			  account: B
+			}
+		}
+		accounts: {
+			A: {
+			  users = [{user: usrA, password: usrA}]
+			  exports: [{stream: foo.*.>}]
+			}
+			B: {
+			  imports: [{stream: {account: A, subject: foo.*.>}}]
+			}
+		}
+	`))
+	defer removeFile(t, hubConf)
+	hub, hubo := RunServerWithConfig(hubConf)
+	defer hub.Shutdown()
+
+	leafConfContet := fmt.Sprintf(`
+		port: -1
+		leafnodes {
+			remotes = [
+				{
+					url: "nats-leaf://leaf:leaf@127.0.0.1:%d"
+					account: B
+				}
+			]
+		}
+		accounts: {
+			B: {
+				exports: [{stream: foo.*.>}]
+			}
+			C: {
+				users: [{user: usrC, password: usrC}]
+				imports: [{stream: {account: B, subject: foo.bar.>}}]
+			}
+		}
+	`, hubo.LeafNode.Port)
+	leafConf := createConfFile(t, []byte(leafConfContet))
+	defer removeFile(t, leafConf)
+	leafo := LoadConfig(leafConf)
+	leafo.LeafNode.ReconnectInterval = 50 * time.Millisecond
+	leaf := RunServer(leafo)
+	defer leaf.Shutdown()
+
+	checkLeafNodeConnected(t, hub)
+	checkLeafNodeConnected(t, leaf)
+
+	subPubAndCheck := func() {
+		t.Helper()
+
+		ncl, err := nats.Connect(leaf.ClientURL(), nats.UserInfo("usrC", "usrC"))
+		if err != nil {
+			t.Fatalf("Error connecting: %v", err)
+		}
+		defer ncl.Close()
+
+		// This will send an LS+ to the "hub" server.
+		sub, err := ncl.SubscribeSync("foo.*.baz")
+		if err != nil {
+			t.Fatalf("Error subscribing: %v", err)
+		}
+		ncl.Flush()
+
+		ncm, err := nats.Connect(hub.ClientURL(), nats.UserInfo("usrA", "usrA"))
+		if err != nil {
+			t.Fatalf("Error connecting: %v", err)
+		}
+		defer ncm.Close()
+
+		// Try a few times in case subject interest has not propagated yet
+		for i := 0; i < 5; i++ {
+			ncm.Publish("foo.bar.baz", []byte("msg"))
+			if _, err := sub.NextMsg(time.Second); err == nil {
+				// OK, done!
+				return
+			}
+		}
+		t.Fatal("Message was not received")
+	}
+	subPubAndCheck()
+
+	// Now cause a restart of the accepting side so that the leaf connection
+	// is recreated.
+	hub.Shutdown()
+	hub = RunServer(hubo)
+	defer hub.Shutdown()
+
+	checkLeafNodeConnected(t, hub)
+	checkLeafNodeConnected(t, leaf)
+
+	subPubAndCheck()
+
+	// Issue a config reload even though we make no modification. There was
+	// a defect that caused the interest propagation to break.
+	// Set the ReconnectInterval to the default value so that reload does not complain.
+	leaf.getOpts().LeafNode.ReconnectInterval = DEFAULT_LEAF_NODE_RECONNECT
+	reloadUpdateConfig(t, leaf, leafConf, leafConfContet)
+
+	// Check again
+	subPubAndCheck()
+}
+
+func TestLeafNodeAuthConfigReload(t *testing.T) {
+	template := `
+		listen: 127.0.0.1:-1
+		accounts { test: {} }
+		leaf {
+			listen: "127.0.0.1:7422"
+			tls {
+				cert_file: "../test/configs/certs/server-cert.pem"
+				key_file:  "../test/configs/certs/server-key.pem"
+				ca_file:   "../test/configs/certs/ca.pem"
+			}
+			authorization {
+				# These are only fields allowed atm.
+				users = [ { user: test, password: "s3cret1", account: "test"  } ]
+			}
+		}
+	`
+	conf := createConfFile(t, []byte(template))
+	defer removeFile(t, conf)
+
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	lg := &captureErrorLogger{errCh: make(chan string, 10)}
+	s.SetLogger(lg, false, false)
+
+	// Reload here should work ok.
+	reloadUpdateConfig(t, s, conf, template)
+}
+
+func TestLeafNodeSignatureCB(t *testing.T) {
+	content := `
+		port: -1
+		server_name: OP
+		operator = "../test/configs/nkeys/op.jwt"
+		resolver = MEMORY
+		listen: "127.0.0.1:-1"
+		leafnodes {
+			listen: "127.0.0.1:-1"
+		}
+	`
+	conf := createConfFile(t, []byte(content))
+	s, opts := RunServerWithConfig(conf)
+	defer removeFile(t, conf)
+	defer s.Shutdown()
+
+	_, akp := createAccount(s)
+	kp, _ := nkeys.CreateUser()
+	pub, _ := kp.PublicKey()
+	nuc := jwt.NewUserClaims(pub)
+	ujwt, err := nuc.Encode(akp)
+	if err != nil {
+		t.Fatalf("Error generating user JWT: %v", err)
+	}
+
+	lopts := &DefaultTestOptions
+	u, err := url.Parse(fmt.Sprintf("nats://%s:%d", opts.LeafNode.Host, opts.LeafNode.Port))
+	if err != nil {
+		t.Fatalf("Error parsing url: %v", err)
+	}
+	remote := &RemoteLeafOpts{URLs: []*url.URL{u}}
+	remote.SignatureCB = func(nonce []byte) (string, []byte, error) {
+		return "", nil, fmt.Errorf("on purpose")
+	}
+	lopts.LeafNode.Remotes = []*RemoteLeafOpts{remote}
+	lopts.LeafNode.ReconnectInterval = 100 * time.Millisecond
+	sl := RunServer(lopts)
+	defer sl.Shutdown()
+
+	slog := &captureErrorLogger{errCh: make(chan string, 10)}
+	sl.SetLogger(slog, false, false)
+
+	// Now check that the leafnode got the error that the callback returned.
+	select {
+	case err := <-slog.errCh:
+		if !strings.Contains(err, "on purpose") {
+			t.Fatalf("Expected error from cb, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Did not get expected error")
+	}
+
+	sl.Shutdown()
+	// Now check what happens if the connection is closed while in the callback.
+	blockCh := make(chan struct{})
+	remote.SignatureCB = func(nonce []byte) (string, []byte, error) {
+		<-blockCh
+		sig, err := kp.Sign(nonce)
+		return ujwt, sig, err
+	}
+	sl = RunServer(lopts)
+	defer sl.Shutdown()
+
+	// Recreate the logger so that we are sure not to have possible previous errors
+	slog = &captureErrorLogger{errCh: make(chan string, 10)}
+	sl.SetLogger(slog, false, false)
+
+	// Get the leaf connection from the temp clients map and close it.
+	checkFor(t, time.Second, 15*time.Millisecond, func() error {
+		var c *client
+		sl.grMu.Lock()
+		for _, cli := range sl.grTmpClients {
+			c = cli
+		}
+		sl.grMu.Unlock()
+		if c == nil {
+			return fmt.Errorf("Client still not found in temp map")
+		}
+		c.closeConnection(ClientClosed)
+		return nil
+	})
+
+	// Release the callback, and check we get the appropriate error.
+	close(blockCh)
+	select {
+	case err := <-slog.errCh:
+		if !strings.Contains(err, ErrConnectionClosed.Error()) {
+			t.Fatalf("Expected error that connection was closed, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Did not get expected error")
+	}
+
+	sl.Shutdown()
+	// Change to a good CB and now it should work
+	remote.SignatureCB = func(nonce []byte) (string, []byte, error) {
+		sig, err := kp.Sign(nonce)
+		return ujwt, sig, err
+	}
+	sl = RunServer(lopts)
+	defer sl.Shutdown()
+	checkLeafNodeConnected(t, sl)
 }

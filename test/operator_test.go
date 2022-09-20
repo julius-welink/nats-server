@@ -16,7 +16,7 @@ package test
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -81,7 +81,6 @@ func TestOperatorRestrictions(t *testing.T) {
 		opts.Accounts = nil
 		opts.Users = nil
 		opts.Nkeys = nil
-		opts.AllowNewAccounts = false
 	}
 
 	wipeOpts()
@@ -100,12 +99,7 @@ func TestOperatorRestrictions(t *testing.T) {
 		t.Fatalf("Expected an error with Nkey Users defined")
 	}
 	wipeOpts()
-	opts.AllowNewAccounts = true
-	if _, err := server.NewServer(opts); err == nil {
-		t.Fatalf("Expected an error with AllowNewAccounts set to true")
-	}
 
-	wipeOpts()
 	opts.AccountResolver = nil
 	if _, err := server.NewServer(opts); err == nil {
 		t.Fatalf("Expected an error without an AccountResolver defined")
@@ -422,12 +416,12 @@ func TestReloadDoesNotWipeAccountsWithOperatorMode(t *testing.T) {
 	s2.Shutdown()
 
 	// Now change config and do reload which will do an auth change.
-	b, err := ioutil.ReadFile(conf)
+	b, err := os.ReadFile(conf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	newConf := bytes.Replace(b, []byte("2.2"), []byte("3.3"), 1)
-	err = ioutil.WriteFile(conf, newConf, 0644)
+	err = os.WriteFile(conf, newConf, 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +505,7 @@ func TestReloadDoesUpdateAccountsWithMemoryResolver(t *testing.T) {
 	accJWT2, accKP2 := createAccountForConfig(t)
 	accPub2, _ := accKP2.PublicKey()
 	contents = strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, accPub2, accJWT2), "\n\t", "\n", -1)
-	err = ioutil.WriteFile(conf, []byte(contents), 0644)
+	err = os.WriteFile(conf, []byte(contents), 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,7 +580,7 @@ func TestReloadFailsWithBadAccountsWithMemoryResolver(t *testing.T) {
 
 	// Now add in bogus account for second item and make sure reload fails.
 	contents = strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, "foo", "bar"), "\n\t", "\n", -1)
-	err = ioutil.WriteFile(conf, []byte(contents), 0644)
+	err = os.WriteFile(conf, []byte(contents), 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,7 +594,7 @@ func TestReloadFailsWithBadAccountsWithMemoryResolver(t *testing.T) {
 	accPub, _ := accKP.PublicKey()
 
 	contents = strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
-	err = ioutil.WriteFile(conf, []byte(contents), 0644)
+	err = os.WriteFile(conf, []byte(contents), 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +608,7 @@ func TestConnsRequestDoesNotLoadAccountCheckingConnLimits(t *testing.T) {
 	sysJWT, sysKP := createAccountForConfig(t)
 	sysPub, _ := sysKP.PublicKey()
 
-	// Do this account by nad to add in connection limits
+	// Do this account by hand to add in connection limits
 	okp, _ := nkeys.FromSeed(oSeed)
 	accKP, _ := nkeys.CreateAccount()
 	accPub, _ := accKP.PublicKey()

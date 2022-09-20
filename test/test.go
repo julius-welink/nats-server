@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -278,11 +277,27 @@ func setupConnWithProto(t tLogger, c net.Conn, proto int) (sendFun, expectFun) {
 	return sendCommand(t, c), expectCommand(t, c)
 }
 
-func setupConnWithAccount(t tLogger, c net.Conn, account string) (sendFun, expectFun) {
-	checkInfoMsg(t, c)
-	cs := fmt.Sprintf("CONNECT {\"verbose\":%v,\"pedantic\":%v,\"tls_required\":%v,\"account\":%q}\r\n", false, false, false, account)
+func setupConnWithAccount(t tLogger, s *server.Server, c net.Conn, account string) (sendFun, expectFun) {
+	info := checkInfoMsg(t, c)
+	s.RegisterAccount(account)
+	acc, err := s.LookupAccount(account)
+	if err != nil {
+		t.Fatalf("Unexpected Error: %v", err)
+	}
+	cs := fmt.Sprintf("CONNECT {\"verbose\":%v,\"pedantic\":%v,\"tls_required\":%v}\r\n", false, false, false)
 	sendProto(t, c, cs)
-	return sendCommand(t, c), expectCommand(t, c)
+
+	send, expect := sendCommand(t, c), expectCommand(t, c)
+	send("PING\r\n")
+	expect(pongRe)
+
+	nc := s.GetClient(info.CID)
+	if nc == nil {
+		t.Fatalf("Could not get client for CID:%d", info.CID)
+	}
+	nc.RegisterUser(&server.User{Account: acc})
+
+	return send, expect
 }
 
 func setupConnWithUserPass(t tLogger, c net.Conn, username, password string) (sendFun, expectFun) {
@@ -623,19 +638,19 @@ func nextServerOpts(opts *server.Options) *server.Options {
 	return nopts
 }
 
-func createDir(t *testing.T, prefix string) string {
+func createDir(t testing.TB, prefix string) string {
 	t.Helper()
 	if err := os.MkdirAll(tempRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
-	dir, err := ioutil.TempDir(tempRoot, prefix)
+	dir, err := os.MkdirTemp(tempRoot, prefix)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return dir
 }
 
-func createFile(t *testing.T, prefix string) *os.File {
+func createFile(t testing.TB, prefix string) *os.File {
 	t.Helper()
 	if err := os.MkdirAll(tempRoot, 0700); err != nil {
 		t.Fatal(err)
@@ -643,23 +658,23 @@ func createFile(t *testing.T, prefix string) *os.File {
 	return createFileAtDir(t, tempRoot, prefix)
 }
 
-func createFileAtDir(t *testing.T, dir, prefix string) *os.File {
+func createFileAtDir(t testing.TB, dir, prefix string) *os.File {
 	t.Helper()
-	f, err := ioutil.TempFile(dir, prefix)
+	f, err := os.CreateTemp(dir, prefix)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return f
 }
 
-func removeDir(t *testing.T, dir string) {
+func removeDir(t testing.TB, dir string) {
 	t.Helper()
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func removeFile(t *testing.T, p string) {
+func removeFile(t testing.TB, p string) {
 	t.Helper()
 	if err := os.Remove(p); err != nil {
 		t.Fatal(err)

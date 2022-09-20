@@ -15,8 +15,10 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,6 +31,7 @@ import (
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+	"github.com/nats-io/nuid"
 )
 
 func createAccount(s *Server) (*Account, nkeys.KeyPair) {
@@ -45,11 +48,10 @@ func createAccount(s *Server) (*Account, nkeys.KeyPair) {
 	return acc, akp
 }
 
-func createUserCreds(t *testing.T, s *Server, akp nkeys.KeyPair) nats.Option {
+func createUserCredsEx(t *testing.T, nuc *jwt.UserClaims, akp nkeys.KeyPair) nats.Option {
 	t.Helper()
 	kp, _ := nkeys.CreateUser()
-	pub, _ := kp.PublicKey()
-	nuc := jwt.NewUserClaims(pub)
+	nuc.Subject, _ = kp.PublicKey()
 	ujwt, err := nuc.Encode(akp)
 	if err != nil {
 		t.Fatalf("Error generating user JWT: %v", err)
@@ -62,6 +64,10 @@ func createUserCreds(t *testing.T, s *Server, akp nkeys.KeyPair) nats.Option {
 		return sig, nil
 	}
 	return nats.UserJWT(userCB, sigCB)
+}
+
+func createUserCreds(t *testing.T, s *Server, akp nkeys.KeyPair) nats.Option {
+	return createUserCredsEx(t, jwt.NewUserClaims("test"), akp)
 }
 
 func runTrustedServer(t *testing.T) (*Server, *Options) {
@@ -420,13 +426,13 @@ func runSolicitWithCredentials(t *testing.T, opts *Options, creds string) (*Serv
 }
 
 // Helper function to check that a leaf node has connected to our server.
-func checkLeafNodeConnected(t *testing.T, s *Server) {
+func checkLeafNodeConnected(t testing.TB, s *Server) {
 	t.Helper()
 	checkLeafNodeConnectedCount(t, s, 1)
 }
 
 // Helper function to check that a leaf node has connected to n server.
-func checkLeafNodeConnectedCount(t *testing.T, s *Server, lnCons int) {
+func checkLeafNodeConnectedCount(t testing.TB, s *Server, lnCons int) {
 	t.Helper()
 	checkFor(t, 5*time.Second, 15*time.Millisecond, func() error {
 		if nln := s.NumLeafNodes(); nln != lnCons {
@@ -780,6 +786,7 @@ func TestSystemAccountConnectionUpdatesStopAfterNoLocal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Error on connect: %v", err)
 		}
+		defer nc.Close()
 		clients = append(clients, nc)
 	}
 
@@ -1236,14 +1243,15 @@ func TestAccountReqMonitoring(t *testing.T) {
 	sacc, sakp := createAccount(s)
 	s.setSystemAccount(sacc)
 	s.EnableJetStream(nil)
+	unusedAcc, _ := createAccount(s)
 	acc, akp := createAccount(s)
-	if acc == nil {
-		t.Fatalf("did not create account")
-	}
 	acc.EnableJetStream(nil)
-	subsz := fmt.Sprintf(accReqSubj, acc.Name, "SUBSZ")
-	connz := fmt.Sprintf(accReqSubj, acc.Name, "CONNZ")
-	jsz := fmt.Sprintf(accReqSubj, acc.Name, "JSZ")
+	subsz := fmt.Sprintf(accDirectReqSubj, acc.Name, "SUBSZ")
+	connz := fmt.Sprintf(accDirectReqSubj, acc.Name, "CONNZ")
+	jsz := fmt.Sprintf(accDirectReqSubj, acc.Name, "JSZ")
+
+	pStatz := fmt.Sprintf(accPingReqSubj, "STATZ")
+	statz := func(name string) string { return fmt.Sprintf(accDirectReqSubj, name, "STATZ") }
 	// Create system account connection to query
 	url := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
 	ncSys, err := nats.Connect(url, createUserCreds(t, s, sakp))
@@ -1258,42 +1266,86 @@ func TestAccountReqMonitoring(t *testing.T) {
 	}
 	defer nc.Close()
 	// query SUBSZ for account
-	if resp, err := ncSys.Request(subsz, nil, time.Second); err != nil {
-		t.Fatalf("Error on request: %v", err)
-	} else if !strings.Contains(string(resp.Data), `"num_subscriptions":3,`) {
-		t.Fatalf("unexpected subs count (expected 3): %v", string(resp.Data))
-	}
+	resp, err := ncSys.Request(subsz, nil, time.Second)
+	require_NoError(t, err)
+	require_Contains(t, string(resp.Data), `"num_subscriptions":4,`)
 	// create a subscription
-	if sub, err := nc.Subscribe("foo", func(msg *nats.Msg) {}); err != nil {
-		t.Fatalf("error on subscribe %v", err)
-	} else {
-		defer sub.Unsubscribe()
-	}
-	nc.Flush()
+	sub, err := nc.Subscribe("foo", func(msg *nats.Msg) {})
+	require_NoError(t, err)
+	defer sub.Unsubscribe()
+
+	require_NoError(t, nc.Flush())
 	// query SUBSZ for account
-	if resp, err := ncSys.Request(subsz, nil, time.Second); err != nil {
-		t.Fatalf("Error on request: %v", err)
-	} else if !strings.Contains(string(resp.Data), `"num_subscriptions":4,`) {
-		t.Fatalf("unexpected subs count (expected 4): %v", string(resp.Data))
-	} else if !strings.Contains(string(resp.Data), `"subject":"foo"`) {
-		t.Fatalf("expected subscription foo: %v", string(resp.Data))
-	}
+	resp, err = ncSys.Request(subsz, nil, time.Second)
+	require_NoError(t, err)
+	require_Contains(t, string(resp.Data), `"num_subscriptions":5,`, `"subject":"foo"`)
 	// query connections for account
-	if resp, err := ncSys.Request(connz, nil, time.Second); err != nil {
-		t.Fatalf("Error on request: %v", err)
-	} else if !strings.Contains(string(resp.Data), `"num_connections":1,`) {
-		t.Fatalf("unexpected subs count (expected 1): %v", string(resp.Data))
-	} else if !strings.Contains(string(resp.Data), `"total":1,`) {
-		t.Fatalf("unexpected subs count (expected 1): %v", string(resp.Data))
-	}
+	resp, err = ncSys.Request(connz, nil, time.Second)
+	require_NoError(t, err)
+	require_Contains(t, string(resp.Data), `"num_connections":1,`, `"total":1,`)
 	// query connections for js account
-	if resp, err := ncSys.Request(jsz, nil, time.Second); err != nil {
-		t.Fatalf("Error on request: %v", err)
-	} else if !strings.Contains(string(resp.Data), `"memory":0,`) {
-		t.Fatalf("jetstream should be enabled but empty: %v", string(resp.Data))
-	} else if !strings.Contains(string(resp.Data), `"storage":0,`) {
-		t.Fatalf("jetstream should be enabled but empty: %v", string(resp.Data))
-	}
+	resp, err = ncSys.Request(jsz, nil, time.Second)
+	require_NoError(t, err)
+	require_Contains(t, string(resp.Data), `"memory":0,`, `"storage":0,`)
+	// query statz/conns for account
+	resp, err = ncSys.Request(statz(acc.Name), nil, time.Second)
+	require_NoError(t, err)
+	respContentAcc := []string{`"conns":1,`, `"total_conns":1`, `"slow_consumers":0`, `"sent":{"msgs":0,"bytes":0}`,
+		`"received":{"msgs":0,"bytes":0}`, fmt.Sprintf(`"acc":"%s"`, acc.Name)}
+	require_Contains(t, string(resp.Data), respContentAcc...)
+
+	rIb := ncSys.NewRespInbox()
+	rSub, err := ncSys.SubscribeSync(rIb)
+	require_NoError(t, err)
+	require_NoError(t, ncSys.PublishRequest(pStatz, rIb, nil))
+	minRespContentForBothAcc := []string{`"conns":1,`, `"total_conns":1`, `"slow_consumers":0`, `"acc":"`}
+	resp, err = rSub.NextMsg(time.Second)
+	require_NoError(t, err)
+	require_Contains(t, string(resp.Data), minRespContentForBothAcc...)
+	// expect one entry per account
+	require_Contains(t, string(resp.Data), fmt.Sprintf(`"acc":"%s"`, acc.Name), fmt.Sprintf(`"acc":"%s"`, sacc.Name))
+
+	// Test ping with filter by account name
+	require_NoError(t, ncSys.PublishRequest(pStatz, rIb, []byte(fmt.Sprintf(`{"accounts":["%s"]}`, sacc.Name))))
+	m, err := rSub.NextMsg(time.Second)
+	require_NoError(t, err)
+	require_Contains(t, string(m.Data), minRespContentForBothAcc...)
+
+	require_NoError(t, ncSys.PublishRequest(pStatz, rIb, []byte(fmt.Sprintf(`{"accounts":["%s"]}`, acc.Name))))
+	m, err = rSub.NextMsg(time.Second)
+	require_NoError(t, err)
+	require_Contains(t, string(m.Data), respContentAcc...)
+
+	// Test include unused for statz and ping of statz
+	unusedContent := []string{`"conns":0,`, `"total_conns":0`, `"slow_consumers":0`,
+		fmt.Sprintf(`"acc":"%s"`, unusedAcc.Name)}
+
+	resp, err = ncSys.Request(statz(unusedAcc.Name),
+		[]byte(fmt.Sprintf(`{"accounts":["%s"], "include_unused":true}`, unusedAcc.Name)),
+		time.Second)
+	require_NoError(t, err)
+	require_Contains(t, string(resp.Data), unusedContent...)
+
+	require_NoError(t, ncSys.PublishRequest(pStatz, rIb,
+		[]byte(fmt.Sprintf(`{"accounts":["%s"], "include_unused":true}`, unusedAcc.Name))))
+	resp, err = rSub.NextMsg(time.Second)
+	require_NoError(t, err)
+	require_Contains(t, string(resp.Data), unusedContent...)
+
+	require_NoError(t, ncSys.PublishRequest(pStatz, rIb, []byte(fmt.Sprintf(`{"accounts":["%s"]}`, unusedAcc.Name))))
+	_, err = rSub.NextMsg(200 * time.Millisecond)
+	require_Error(t, err)
+
+	// Test ping from within account
+	ib := nc.NewRespInbox()
+	rSub, err = nc.SubscribeSync(ib)
+	require_NoError(t, err)
+	require_NoError(t, nc.PublishRequest(pStatz, ib, nil))
+	resp, err = rSub.NextMsg(time.Second)
+	require_NoError(t, err)
+	require_Contains(t, string(resp.Data), respContentAcc...)
+	_, err = rSub.NextMsg(200 * time.Millisecond)
+	require_Error(t, err)
 }
 
 func TestAccountReqInfo(t *testing.T) {
@@ -1309,7 +1361,7 @@ func TestAccountReqInfo(t *testing.T) {
 	ajwt1, _ := nac1.Encode(oKp)
 	addAccountToMemResolver(s, pub1, ajwt1)
 	s.LookupAccount(pub1)
-	info1 := fmt.Sprintf(accReqSubj, pub1, "INFO")
+	info1 := fmt.Sprintf(accDirectReqSubj, pub1, "INFO")
 	// Now add an account with service imports.
 	akp2, _ := nkeys.CreateAccount()
 	pub2, _ := akp2.PublicKey()
@@ -1318,7 +1370,7 @@ func TestAccountReqInfo(t *testing.T) {
 	ajwt2, _ := nac2.Encode(oKp)
 	addAccountToMemResolver(s, pub2, ajwt2)
 	s.LookupAccount(pub2)
-	info2 := fmt.Sprintf(accReqSubj, pub2, "INFO")
+	info2 := fmt.Sprintf(accDirectReqSubj, pub2, "INFO")
 	// Create system account connection to query
 	url := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
 	ncSys, err := nats.Connect(url, createUserCreds(t, s, sakp))
@@ -1366,7 +1418,7 @@ func TestAccountReqInfo(t *testing.T) {
 		t.Fatalf("Unmarshalling failed: %v", err)
 	} else if len(info.Exports) != 1 {
 		t.Fatalf("Unexpected value: %v", info.Exports)
-	} else if len(info.Imports) != 2 {
+	} else if len(info.Imports) != 3 {
 		t.Fatalf("Unexpected value: %+v", info.Imports)
 	} else if info.Exports[0].Subject != "req.*" {
 		t.Fatalf("Unexpected value: %v", info.Exports)
@@ -1374,7 +1426,7 @@ func TestAccountReqInfo(t *testing.T) {
 		t.Fatalf("Unexpected value: %v", info.Exports)
 	} else if info.Exports[0].ResponseType != jwt.ResponseTypeSingleton {
 		t.Fatalf("Unexpected value: %v", info.Exports)
-	} else if info.SubCnt != 2 {
+	} else if info.SubCnt != 3 {
 		t.Fatalf("Unexpected value: %v", info.SubCnt)
 	} else {
 		checkCommon(&info, &srv, pub1, ajwt1)
@@ -1387,7 +1439,7 @@ func TestAccountReqInfo(t *testing.T) {
 		t.Fatalf("Unmarshalling failed: %v", err)
 	} else if len(info.Exports) != 0 {
 		t.Fatalf("Unexpected value: %v", info.Exports)
-	} else if len(info.Imports) != 3 {
+	} else if len(info.Imports) != 4 {
 		t.Fatalf("Unexpected value: %+v", info.Imports)
 	}
 	// Here we need to find our import
@@ -1405,7 +1457,7 @@ func TestAccountReqInfo(t *testing.T) {
 		t.Fatalf("Unexpected value: %+v", si)
 	} else if si.Account != pub1 {
 		t.Fatalf("Unexpected value: %+v", si)
-	} else if info.SubCnt != 3 {
+	} else if info.SubCnt != 4 {
 		t.Fatalf("Unexpected value: %+v", si)
 	} else {
 		checkCommon(&info, &srv, pub2, ajwt2)
@@ -1541,11 +1593,15 @@ func TestAccountConnsLimitExceededAfterUpdateDisconnectNewOnly(t *testing.T) {
 	newConns := make([]*nats.Conn, 0, 5)
 	url := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
 	for i := 0; i < 5; i++ {
-		nats.Connect(url, nats.NoReconnect(), createUserCreds(t, s, akp))
+		nc, err := nats.Connect(url, nats.NoReconnect(), createUserCreds(t, s, akp))
+		require_NoError(t, err)
+		defer nc.Close()
 	}
 	time.Sleep(500 * time.Millisecond)
 	for i := 0; i < 5; i++ {
-		nc, _ := nats.Connect(url, nats.NoReconnect(), createUserCreds(t, s, akp))
+		nc, err := nats.Connect(url, nats.NoReconnect(), createUserCreds(t, s, akp))
+		require_NoError(t, err)
+		defer nc.Close()
 		newConns = append(newConns, nc)
 	}
 
@@ -1608,7 +1664,7 @@ func TestSystemAccountWithGateways(t *testing.T) {
 
 	// If this tests fails with wrong number after 10 seconds we may have
 	// added a new inititial subscription for the eventing system.
-	checkExpectedSubs(t, 40, sa)
+	checkExpectedSubs(t, 45, sa)
 
 	// Create a client on B and see if we receive the event
 	urlb := fmt.Sprintf("nats://%s:%d", ob.Host, ob.Port)
@@ -1719,6 +1775,53 @@ func TestSystemAccountNoAuthUser(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestServerAccountConns(t *testing.T) {
+	// speed up hb
+	orgHBInterval := eventsHBInterval
+	eventsHBInterval = time.Millisecond * 100
+	defer func() { eventsHBInterval = orgHBInterval }()
+	conf := createConfFile(t, []byte(`
+	   host: 127.0.0.1
+	   port: -1
+	   system_account: SYS
+	   accounts: {
+			   SYS: {users: [{user: s, password: s}]}
+			   ACC: {users: [{user: a, password: a}]}
+	   }`))
+	defer removeFile(t, conf)
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	nc := natsConnect(t, s.ClientURL(), nats.UserInfo("a", "a"))
+	defer nc.Close()
+
+	subOut, err := nc.SubscribeSync("foo")
+	require_NoError(t, err)
+	hw := "HELLO WORLD"
+	nc.Publish("foo", []byte(hw))
+	nc.Publish("bar", []byte(hw)) // will only count towards received
+	nc.Flush()
+	m, err := subOut.NextMsg(time.Second)
+	require_NoError(t, err)
+	require_Equal(t, string(m.Data), hw)
+
+	ncs := natsConnect(t, s.ClientURL(), nats.UserInfo("s", "s"))
+	defer ncs.Close()
+	subs, err := ncs.SubscribeSync("$SYS.ACCOUNT.ACC.SERVER.CONNS")
+	require_NoError(t, err)
+
+	m, err = subs.NextMsg(time.Second)
+	require_NoError(t, err)
+	accConns := &AccountNumConns{}
+	err = json.Unmarshal(m.Data, accConns)
+	require_NoError(t, err)
+
+	require_True(t, accConns.Received.Msgs == 2)
+	require_True(t, accConns.Received.Bytes == 2*int64(len(hw)))
+	require_True(t, accConns.Sent.Msgs == 1)
+	require_True(t, accConns.Sent.Bytes == int64(len(hw)))
 }
 
 func TestServerEventsStatsZ(t *testing.T) {
@@ -2073,6 +2176,10 @@ func TestServerEventsPingMonitorz(t *testing.T) {
 			[]string{"now", "routes"}},
 
 		{"JSZ", nil, &JSzOptions{}, []string{"now", "disabled"}},
+
+		{"HEALTHZ", nil, &JSzOptions{}, []string{"status"}},
+		{"HEALTHZ", &HealthzOptions{JSEnabled: true}, &JSzOptions{}, []string{"status"}},
+		{"HEALTHZ", &HealthzOptions{JSServerOnly: true}, &JSzOptions{}, []string{"status"}},
 	}
 
 	for i, test := range tests {
@@ -2370,4 +2477,68 @@ func TestServerEventsFilteredByTag(t *testing.T) {
 	m2 := <-msgs
 	require_Contains(t, string(m1.Data)+string(m2.Data), "srv-A", "srv-B", "foo", "bar", "baz")
 	require_Len(t, len(msgs), 0)
+}
+
+// https://github.com/nats-io/nats-server/issues/3177
+func TestServerEventsAndDQSubscribers(t *testing.T) {
+	c := createJetStreamClusterWithTemplate(t, jsClusterAccountsTempl, "DDQ", 3)
+	defer c.shutdown()
+
+	nc, err := nats.Connect(c.randomServer().ClientURL(), nats.UserInfo("admin", "s3cr3t!"))
+	require_NoError(t, err)
+	defer nc.Close()
+
+	sub, err := nc.QueueSubscribeSync("$SYS.ACCOUNT.*.DISCONNECT", "qq")
+	require_NoError(t, err)
+	nc.Flush()
+
+	// Create and disconnect 10 random connections.
+	for i := 0; i < 10; i++ {
+		nc, err := nats.Connect(c.randomServer().ClientURL())
+		require_NoError(t, err)
+		nc.Close()
+	}
+
+	checkSubsPending(t, sub, 10)
+}
+
+func Benchmark_GetHash(b *testing.B) {
+	b.StopTimer()
+	// Get 100 random names
+	names := make([]string, 0, 100)
+	for i := 0; i < 100; i++ {
+		names = append(names, nuid.Next())
+	}
+	hashes := make([]string, 0, 100)
+	for j := 0; j < 100; j++ {
+		sha := sha256.New()
+		sha.Write([]byte(names[j]))
+		b := sha.Sum(nil)
+		for i := 0; i < 8; i++ {
+			b[i] = digits[int(b[i]%base)]
+		}
+		hashes = append(hashes, string(b[:8]))
+	}
+	wg := sync.WaitGroup{}
+	wg.Add(8)
+	errCh := make(chan error, 8)
+	b.StartTimer()
+	for i := 0; i < 8; i++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < b.N; i++ {
+				idx := rand.Intn(100)
+				if h := getHash(names[idx]); h != hashes[idx] {
+					errCh <- fmt.Errorf("Hash for name %q was %q, but should be %q", names[idx], h, hashes[idx])
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		b.Fatal(err.Error())
+	default:
+	}
 }

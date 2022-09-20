@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"reflect"
@@ -161,6 +160,7 @@ func TestTLSConfigFile(t *testing.T) {
 	if tlsConfig.MinVersion != tls.VersionTLS12 {
 		t.Fatalf("Expected MinVersion of 1.2 [%v], got [%v]", tls.VersionTLS12, tlsConfig.MinVersion)
 	}
+	//lint:ignore SA1019 We want to retry on a bunch of errors here.
 	if !tlsConfig.PreferServerCipherSuites {
 		t.Fatal("Expected PreferServerCipherSuites to be true")
 	}
@@ -1133,7 +1133,7 @@ func TestBadNkeyConfig(t *testing.T) {
     authorization {
       users = [ {nkey: "Ufoo"}]
     }`
-	if err := ioutil.WriteFile(confFileName, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(confFileName, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config file: %v", err)
 	}
 	if _, err := ProcessConfigFile(confFileName); err == nil {
@@ -1150,7 +1150,7 @@ func TestNkeyWithPassConfig(t *testing.T) {
         {nkey: "UDKTV7HZVYJFJN64LLMYQBUR6MTNNYCDC3LAZH4VHURW3GZLL3FULBXV", pass: "foo"}
       ]
     }`
-	if err := ioutil.WriteFile(confFileName, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(confFileName, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config file: %v", err)
 	}
 	if _, err := ProcessConfigFile(confFileName); err == nil {
@@ -1167,7 +1167,7 @@ func TestTokenWithUserPass(t *testing.T) {
 		pass: password
 		token: $2a$11$whatever
 	}`
-	if err := ioutil.WriteFile(confFileName, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(confFileName, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config file: %v", err)
 	}
 	_, err := ProcessConfigFile(confFileName)
@@ -1189,7 +1189,7 @@ func TestTokenWithUsers(t *testing.T) {
 			{user: test, password: test}
 		]
 	}`
-	if err := ioutil.WriteFile(confFileName, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(confFileName, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config file: %v", err)
 	}
 	_, err := ProcessConfigFile(confFileName)
@@ -1204,7 +1204,7 @@ func TestTokenWithUsers(t *testing.T) {
 func TestParseWriteDeadline(t *testing.T) {
 	confFile := "test.conf"
 	defer removeFile(t, confFile)
-	if err := ioutil.WriteFile(confFile, []byte("write_deadline: \"1x\""), 0666); err != nil {
+	if err := os.WriteFile(confFile, []byte("write_deadline: \"1x\""), 0666); err != nil {
 		t.Fatalf("Error writing config file: %v", err)
 	}
 	_, err := ProcessConfigFile(confFile)
@@ -1215,7 +1215,7 @@ func TestParseWriteDeadline(t *testing.T) {
 		t.Fatalf("Expected error related to parsing, got %v", err)
 	}
 	removeFile(t, confFile)
-	if err := ioutil.WriteFile(confFile, []byte("write_deadline: \"1s\""), 0666); err != nil {
+	if err := os.WriteFile(confFile, []byte("write_deadline: \"1s\""), 0666); err != nil {
 		t.Fatalf("Error writing config file: %v", err)
 	}
 	opts, err := ProcessConfigFile(confFile)
@@ -1233,7 +1233,7 @@ func TestParseWriteDeadline(t *testing.T) {
 		os.Stdout = oldStdout
 	}()
 	os.Stdout = w
-	if err := ioutil.WriteFile(confFile, []byte("write_deadline: 2"), 0666); err != nil {
+	if err := os.WriteFile(confFile, []byte("write_deadline: 2"), 0666); err != nil {
 		t.Fatalf("Error writing config file: %v", err)
 	}
 	opts, err = ProcessConfigFile(confFile)
@@ -2108,7 +2108,7 @@ func TestParsingGateways(t *testing.T) {
 	`
 	file := "server_config_gateways.conf"
 	defer removeFile(t, file)
-	if err := ioutil.WriteFile(file, []byte(content), 0600); err != nil {
+	if err := os.WriteFile(file, []byte(content), 0600); err != nil {
 		t.Fatalf("Error writing config file: %v", err)
 	}
 	opts, err := ProcessConfigFile(file)
@@ -2362,7 +2362,7 @@ func TestParsingGatewaysErrors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			file := fmt.Sprintf("server_config_gateways_%s.conf", test.name)
 			defer removeFile(t, file)
-			if err := ioutil.WriteFile(file, []byte(test.content), 0600); err != nil {
+			if err := os.WriteFile(file, []byte(test.content), 0600); err != nil {
 				t.Fatalf("Error writing config file: %v", err)
 			}
 			_, err := ProcessConfigFile(file)
@@ -2569,7 +2569,7 @@ func TestLargeMaxControlLine(t *testing.T) {
 	content := `
     max_control_line = 3000000000
     `
-	if err := ioutil.WriteFile(confFileName, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(confFileName, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config file: %v", err)
 	}
 	if _, err := ProcessConfigFile(confFileName); err == nil {
@@ -3285,4 +3285,76 @@ func TestGetStorageSize(t *testing.T) {
 		}
 	}
 
+}
+
+func TestAuthorizationAndAccountsMisconfigurations(t *testing.T) {
+	// There is a test called TestConfigCheck but we can't use it
+	// because the place where the error will be reported will depend
+	// if the error is found while parsing authorization{} or
+	// accounts{}, but we can't control the internal parsing of those
+	// (due to lexer giving back a map and iteration over map is random)
+	// regardless of the ordering in the configuration file.
+	// The test is also repeated
+	for _, test := range []struct {
+		name   string
+		config string
+		err    string
+	}{
+		{
+			"duplicate users",
+			`
+			authorization = {users = [ {user: "user1", pass: "pwd"} ] }
+			accounts { ACC { users = [ {user: "user1"} ] } }
+			`,
+			fmt.Sprintf("Duplicate user %q detected", "user1"),
+		},
+		{
+			"duplicate nkey",
+			`
+			authorization = {users = [ {nkey: UC6NLCN7AS34YOJVCYD4PJ3QB7QGLYG5B5IMBT25VW5K4TNUJODM7BOX} ] }
+			accounts { ACC { users = [ {nkey: UC6NLCN7AS34YOJVCYD4PJ3QB7QGLYG5B5IMBT25VW5K4TNUJODM7BOX} ] } }
+			`,
+			fmt.Sprintf("Duplicate nkey %q detected", "UC6NLCN7AS34YOJVCYD4PJ3QB7QGLYG5B5IMBT25VW5K4TNUJODM7BOX"),
+		},
+		{
+			"auth single user and password and accounts users",
+			`
+			authorization = {user: "user1", password: "pwd"}
+			accounts = { ACC { users = [ {user: "user2", pass: "pwd"} ] } }
+			`,
+			"Can not have a single user/pass",
+		},
+		{
+			"auth single user and password and accounts nkeys",
+			`
+			authorization = {user: "user1", password: "pwd"}
+			accounts = { ACC { users = [ {nkey: UC6NLCN7AS34YOJVCYD4PJ3QB7QGLYG5B5IMBT25VW5K4TNUJODM7BOX} ] } }
+			`,
+			"Can not have a single user/pass",
+		},
+		{
+			"auth token and accounts users",
+			`
+			authorization = {token: "my_token"}
+			accounts = { ACC { users = [ {user: "user2", pass: "pwd"} ] } }
+			`,
+			"Can not have a token",
+		},
+		{
+			"auth token and accounts nkeys",
+			`
+			authorization = {token: "my_token"}
+			accounts = { ACC { users = [ {nkey: UC6NLCN7AS34YOJVCYD4PJ3QB7QGLYG5B5IMBT25VW5K4TNUJODM7BOX} ] } }
+			`,
+			"Can not have a token",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conf := createConfFile(t, []byte(test.config))
+			defer removeFile(t, conf)
+			if _, err := ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), test.err) {
+				t.Fatalf("Expected error %q, got %q", test.err, err.Error())
+			}
+		})
+	}
 }

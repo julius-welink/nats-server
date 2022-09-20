@@ -17,12 +17,14 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"runtime"
 	"sort"
@@ -157,7 +159,7 @@ func readBodyEx(t *testing.T, url string, status int, content string) []byte {
 	if ct != content {
 		stackFatalf(t, "Expected %s content-type, got %s\n", content, ct)
 	}
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		stackFatalf(t, "Got an error reading the body: %v\n", err)
 	}
@@ -677,7 +679,6 @@ func TestConnzLastActivity(t *testing.T) {
 		if barLA.Equal(nextLA) {
 			t.Fatalf("Publish should have triggered update to LastActivity\n")
 		}
-		barLA = nextLA
 
 		// Message delivery on ncFoo should have triggered as well.
 		nextLA = ciFoo.LastActivity
@@ -1085,7 +1086,7 @@ func TestConnzSortedByStopTimeClosedConn(t *testing.T) {
 	}
 	checkClosedConns(t, s, 4, time.Second)
 
-	//Now adjust the Stop times for these with some random values.
+	// Now adjust the Stop times for these with some random values.
 	s.mu.Lock()
 	now := time.Now().UTC()
 	ccs := s.closed.closedClients()
@@ -1130,7 +1131,7 @@ func TestConnzSortedByReason(t *testing.T) {
 	}
 	checkClosedConns(t, s, 20, time.Second)
 
-	//Now adjust the Reasons for these with some random values.
+	// Now adjust the Reasons for these with some random values.
 	s.mu.Lock()
 	ccs := s.closed.closedClients()
 	max := int(ServerShutdown)
@@ -1313,6 +1314,7 @@ func TestConnzWithRoutes(t *testing.T) {
 	routeURL, _ := url.Parse(fmt.Sprintf("nats-route://127.0.0.1:%d", s.ClusterAddr().Port))
 	opts.Routes = []*url.URL{routeURL}
 
+	start := time.Now()
 	sc := RunServer(opts)
 	defer sc.Shutdown()
 
@@ -1324,10 +1326,10 @@ func TestConnzWithRoutes(t *testing.T) {
 		// Test contents..
 		// Make sure routes don't show up under connz, but do under routez
 		if c.NumConns != 0 {
-			t.Fatalf("Expected 0 connections, got %d\n", c.NumConns)
+			t.Fatalf("Expected 0 connections, got %d", c.NumConns)
 		}
 		if c.Conns == nil || len(c.Conns) != 0 {
-			t.Fatalf("Expected 0 connections in array, got %p\n", c.Conns)
+			t.Fatalf("Expected 0 connections in array, got %p", c.Conns)
 		}
 	}
 
@@ -1345,17 +1347,32 @@ func TestConnzWithRoutes(t *testing.T) {
 			rz := pollRoutez(t, s, mode, url+urlSuffix, &RoutezOptions{Subscriptions: subs == 1, SubscriptionsDetail: subs == 2})
 
 			if rz.NumRoutes != 1 {
-				t.Fatalf("Expected 1 route, got %d\n", rz.NumRoutes)
+				t.Fatalf("Expected 1 route, got %d", rz.NumRoutes)
 			}
 
 			if len(rz.Routes) != 1 {
-				t.Fatalf("Expected route array of 1, got %v\n", len(rz.Routes))
+				t.Fatalf("Expected route array of 1, got %v", len(rz.Routes))
 			}
 
 			route := rz.Routes[0]
 
 			if route.DidSolicit {
-				t.Fatalf("Expected unsolicited route, got %v\n", route.DidSolicit)
+				t.Fatalf("Expected unsolicited route, got %v", route.DidSolicit)
+			}
+
+			if route.Start.IsZero() {
+				t.Fatalf("Expected Start to be set, got %+v", route)
+			} else if route.Start.Before(start) {
+				t.Fatalf("Unexpected start time: route was started around %v, got %v", start, route.Start)
+			}
+			if route.LastActivity.IsZero() {
+				t.Fatalf("Expected LastActivity to be set, got %+v", route)
+			}
+			if route.Uptime == _EMPTY_ {
+				t.Fatalf("Expected Uptime to be set, it was not")
+			}
+			if route.Idle == _EMPTY_ {
+				t.Fatalf("Expected Idle to be set, it was not")
 			}
 
 			// Don't ask for subs, so there should not be any
@@ -1656,7 +1673,7 @@ func TestHandleRoot(t *testing.T) {
 		t.Fatalf("Expected a %d response, got %d\n", http.StatusOK, resp.StatusCode)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("Expected no error reading body: Got %v\n", err)
 	}
@@ -1994,7 +2011,7 @@ func TestConcurrentMonitoring(t *testing.T) {
 					ech <- fmt.Sprintf("Expected application/json content-type, got %s\n", ct)
 					return
 				}
-				if _, err := ioutil.ReadAll(resp.Body); err != nil {
+				if _, err := io.ReadAll(resp.Body); err != nil {
 					ech <- fmt.Sprintf("Got an error reading the body: %v\n", err)
 					return
 				}
@@ -2166,6 +2183,62 @@ func TestConnzTLSCfg(t *testing.T) {
 		check(varz.Cluster.TLSVerify, varz.Cluster.TLSRequired, varz.Cluster.TLSTimeout)
 		check(varz.Gateway.TLSVerify, varz.Gateway.TLSRequired, varz.Gateway.TLSTimeout)
 		check(varz.LeafNode.TLSVerify, varz.LeafNode.TLSRequired, varz.LeafNode.TLSTimeout)
+	}
+}
+
+func TestConnzTLSPeerCerts(t *testing.T) {
+	resetPreviousHTTPConnections()
+
+	tc := &TLSConfigOpts{}
+	tc.CertFile = "../test/configs/certs/server-cert.pem"
+	tc.KeyFile = "../test/configs/certs/server-key.pem"
+	tc.CaFile = "../test/configs/certs/ca.pem"
+	tc.Verify = true
+	tc.Timeout = 2.0
+
+	var err error
+	opts := DefaultMonitorOptions()
+	opts.TLSConfig, err = GenTLSConfig(tc)
+	require_NoError(t, err)
+
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	nc := natsConnect(t, s.ClientURL(),
+		nats.ClientCert("../test/configs/certs/client-cert.pem", "../test/configs/certs/client-key.pem"),
+		nats.RootCAs("../test/configs/certs/ca.pem"))
+	defer nc.Close()
+
+	endpoint := fmt.Sprintf("http://%s:%d/connz", opts.HTTPHost, s.MonitorAddr().Port)
+	for mode := 0; mode < 2; mode++ {
+		// Without "auth" option, we should not get the details
+		connz := pollConz(t, s, mode, endpoint, nil)
+		require_True(t, len(connz.Conns) == 1)
+		c := connz.Conns[0]
+		if c.TLSPeerCerts != nil {
+			t.Fatalf("Did not expect TLSPeerCerts when auth is not specified: %+v", c.TLSPeerCerts)
+		}
+		// Now specify "auth" option
+		connz = pollConz(t, s, mode, endpoint+"?auth=1", &ConnzOptions{Username: true})
+		require_True(t, len(connz.Conns) == 1)
+		c = connz.Conns[0]
+		if c.TLSPeerCerts == nil {
+			t.Fatal("Expected TLSPeerCerts to be set, was not")
+		} else if len(c.TLSPeerCerts) != 1 {
+			t.Fatalf("Unexpected peer certificates: %+v", c.TLSPeerCerts)
+		} else {
+			for _, d := range c.TLSPeerCerts {
+				if d.Subject != "CN=localhost,OU=nats.io,O=Synadia,ST=California,C=US" {
+					t.Fatalf("Unexpected subject: %s", d.Subject)
+				}
+				if len(d.SubjectPKISha256) != 64 {
+					t.Fatalf("Unexpected spki_sha256: %s", d.SubjectPKISha256)
+				}
+				if len(d.CertSha256) != 64 {
+					t.Fatalf("Unexpected cert_sha256: %s", d.CertSha256)
+				}
+			}
+		}
 	}
 }
 
@@ -2388,7 +2461,7 @@ func Benchmark_VarzHttp(b *testing.B) {
 			b.Fatalf("Expected no error: Got %v\n", err)
 		}
 		defer resp.Body.Close()
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			b.Fatalf("Got an error reading the body: %v\n", err)
 		}
@@ -3151,6 +3224,9 @@ func TestMonitorGatewayz(t *testing.T) {
 }
 
 func TestMonitorGatewayzAccounts(t *testing.T) {
+	GatewayDoNotForceInterestOnlyMode(true)
+	defer GatewayDoNotForceInterestOnlyMode(false)
+
 	resetPreviousHTTPConnections()
 
 	// Create bunch of Accounts
@@ -3579,7 +3655,7 @@ func TestMonitorOpJWT(t *testing.T) {
 	sa, _ := RunServerWithConfig(conf)
 	defer sa.Shutdown()
 
-	theJWT, err := ioutil.ReadFile("../test/configs/nkeys/op.jwt")
+	theJWT, err := os.ReadFile("../test/configs/nkeys/op.jwt")
 	require_NoError(t, err)
 	theJWT = []byte(strings.Split(string(theJWT), "\n")[1])
 	claim, err := jwt.DecodeOperatorClaims(string(theJWT))
@@ -3838,7 +3914,7 @@ func TestMonitorLeafz(t *testing.T) {
 				t.Fatalf("RTT not tracked?")
 			}
 			// LDS should be only one.
-			if ln.NumSubs != 3 || len(ln.Subs) != 3 {
+			if ln.NumSubs != 4 || len(ln.Subs) != 4 {
 				t.Fatalf("Expected 3 subs, got %v (%v)", ln.NumSubs, ln.Subs)
 			}
 		}
@@ -3848,28 +3924,26 @@ func TestMonitorLeafz(t *testing.T) {
 func TestMonitorAccountz(t *testing.T) {
 	s := RunServer(DefaultMonitorOptions())
 	defer s.Shutdown()
-	body := string(readBody(t, fmt.Sprintf("http://127.0.0.1:%d/accountz", s.MonitorAddr().Port)))
-	if !strings.Contains(body, `$G`) {
-		t.Fatalf("Body missing value. Contains: %s", body)
-	} else if !strings.Contains(body, `$SYS`) {
-		t.Fatalf("Body missing value. Contains: %s", body)
-	} else if !strings.Contains(body, `"accounts": [`) {
-		t.Fatalf("Body missing value. Contains: %s", body)
-	} else if !strings.Contains(body, `"system_account": "$SYS"`) {
-		t.Fatalf("Body missing value. Contains: %s", body)
-	}
-	body = string(readBody(t, fmt.Sprintf("http://127.0.0.1:%d/accountz?acc=$SYS", s.MonitorAddr().Port)))
-	if !strings.Contains(body, `"account_detail": {`) {
-		t.Fatalf("Body missing value. Contains: %s", body)
-	} else if !strings.Contains(body, `"account_name": "$SYS",`) {
-		t.Fatalf("Body missing value. Contains: %s", body)
-	} else if !strings.Contains(body, `"subscriptions": 36,`) {
-		t.Fatalf("Body missing value. Contains: %s", body)
-	} else if !strings.Contains(body, `"is_system": true,`) {
-		t.Fatalf("Body missing value. Contains: %s", body)
-	} else if !strings.Contains(body, `"system_account": "$SYS"`) {
-		t.Fatalf("Body missing value. Contains: %s", body)
-	}
+	body := string(readBody(t, fmt.Sprintf("http://127.0.0.1:%d%s", s.MonitorAddr().Port, AccountzPath)))
+	require_Contains(t, body, `$G`)
+	require_Contains(t, body, `$SYS`)
+	require_Contains(t, body, `"accounts": [`)
+	require_Contains(t, body, `"system_account": "$SYS"`)
+
+	body = string(readBody(t, fmt.Sprintf("http://127.0.0.1:%d%s?acc=$SYS", s.MonitorAddr().Port, AccountzPath)))
+	require_Contains(t, body, `"account_detail": {`)
+	require_Contains(t, body, `"account_name": "$SYS",`)
+	require_Contains(t, body, `"subscriptions": 40,`)
+	require_Contains(t, body, `"is_system": true,`)
+	require_Contains(t, body, `"system_account": "$SYS"`)
+
+	body = string(readBody(t, fmt.Sprintf("http://127.0.0.1:%d%s?unused=1", s.MonitorAddr().Port, AccountStatzPath)))
+	require_Contains(t, body, `"acc": "$G"`)
+	require_Contains(t, body, `"acc": "$SYS"`)
+	require_Contains(t, body, `"sent": {`)
+	require_Contains(t, body, `"received": {`)
+	require_Contains(t, body, `"total_conns": 0,`)
+	require_Contains(t, body, `"leafnodes": 0,`)
 }
 
 func TestMonitorAuthorizedUsers(t *testing.T) {
@@ -3968,17 +4042,35 @@ func TestMonitorAuthorizedUsers(t *testing.T) {
 // Helper function to check that a JS cluster is formed
 func checkForJSClusterUp(t *testing.T, servers ...*Server) {
 	t.Helper()
-	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
-		for _, s := range servers {
-			if !s.JetStreamEnabled() {
-				return fmt.Errorf("jetstream not enabled")
-			}
-			if !s.JetStreamIsCurrent() {
-				return fmt.Errorf("jetstream not current")
-			}
-		}
-		return nil
-	})
+	// We will use the other JetStream helpers here.
+	c := &cluster{t: t, servers: servers}
+	c.checkClusterFormed()
+	c.waitOnClusterReady()
+}
+
+func TestMonitorJszNonJszServer(t *testing.T) {
+	srv := RunServer(DefaultOptions())
+	defer srv.Shutdown()
+
+	if !srv.ReadyForConnections(5 * time.Second) {
+		t.Fatalf("server did not become ready")
+	}
+
+	jsi, err := srv.Jsz(&JSzOptions{})
+	if err != nil {
+		t.Fatalf("jsi failed: %v", err)
+	}
+	if jsi.ID != srv.ID() {
+		t.Fatalf("did not receive valid info")
+	}
+
+	jsi, err = srv.Jsz(&JSzOptions{LeaderOnly: true})
+	if !errors.Is(err, errSkipZreq) {
+		t.Fatalf("expected a skip z req error: %v", err)
+	}
+	if jsi != nil {
+		t.Fatalf("expected no jsi: %v", jsi)
+	}
 }
 
 func TestMonitorJsz(t *testing.T) {
@@ -4023,7 +4115,7 @@ func TestMonitorJsz(t *testing.T) {
 		jetstream: {
 			max_mem_store: 10Mb
 			max_file_store: 10Mb
-			store_dir: %s
+			store_dir: '%s'
 		}
 		cluster {
 			name: cluster_name
@@ -4056,6 +4148,14 @@ func TestMonitorJsz(t *testing.T) {
 		Replicas: 1,
 	})
 	require_NoError(t, err)
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:     "my-stream-mirror",
+		Replicas: 2,
+		Mirror: &nats.StreamSource{
+			Name: "my-stream-replicated",
+		},
+	})
+	require_NoError(t, err)
 	_, err = js.AddConsumer("my-stream-replicated", &nats.ConsumerConfig{
 		Durable:   "my-consumer-replicated",
 		AckPolicy: nats.AckExplicitPolicy,
@@ -4066,9 +4166,16 @@ func TestMonitorJsz(t *testing.T) {
 		AckPolicy: nats.AckExplicitPolicy,
 	})
 	require_NoError(t, err)
+	_, err = js.AddConsumer("my-stream-mirror", &nats.ConsumerConfig{
+		Durable:   "my-consumer-mirror",
+		AckPolicy: nats.AckExplicitPolicy,
+	})
+	require_NoError(t, err)
 	nc.Flush()
 	_, err = js.Publish("foo", nil)
 	require_NoError(t, err)
+	// Wait for mirror replication
+	time.Sleep(100 * time.Millisecond)
 
 	monUrl1 := fmt.Sprintf("http://127.0.0.1:%d/jsz", 7501)
 	monUrl2 := fmt.Sprintf("http://127.0.0.1:%d/jsz", 5501)
@@ -4080,13 +4187,13 @@ func TestMonitorJsz(t *testing.T) {
 				t.Fatalf("expected no account to be returned by %s but got %v", url, info)
 			}
 			if info.Streams == 0 {
-				t.Fatalf("expected stream count to be 2 but got %d", info.Streams)
+				t.Fatalf("expected stream count to be 3 but got %d", info.Streams)
 			}
 			if info.Consumers == 0 {
-				t.Fatalf("expected consumer count to be 2 but got %d", info.Consumers)
+				t.Fatalf("expected consumer count to be 3 but got %d", info.Consumers)
 			}
-			if info.Messages != 1 {
-				t.Fatalf("expected one message but got %d", info.Messages)
+			if info.Messages != 2 {
+				t.Fatalf("expected two message but got %d", info.Messages)
 			}
 		}
 	})
@@ -4095,6 +4202,41 @@ func TestMonitorJsz(t *testing.T) {
 			info := readJsInfo(url + "?accounts=true")
 			if len(info.AccountDetails) != 2 {
 				t.Fatalf("expected both accounts to be returned by %s but got %v", url, info)
+			}
+		}
+	})
+	t.Run("accounts reserved metrics", func(t *testing.T) {
+		for _, url := range []string{monUrl1, monUrl2} {
+			info := readJsInfo(url + "?accounts=true&acc=ACC")
+			if len(info.AccountDetails) != 1 {
+				t.Fatalf("expected single account")
+			}
+			acc := info.AccountDetails[0]
+			got := int(acc.ReservedMemory)
+			expected := 5242880
+			if got != expected {
+				t.Errorf("Expected: %v, got: %v", expected, got)
+			}
+			got = int(acc.ReservedStore)
+			expected = 4194304
+			if got != expected {
+				t.Errorf("Expected: %v, got: %v", expected, got)
+			}
+
+			info = readJsInfo(url + "?accounts=true&acc=BCC_TO_HAVE_ONE_EXTRA")
+			if len(info.AccountDetails) != 1 {
+				t.Fatalf("expected single account")
+			}
+			acc = info.AccountDetails[0]
+			got = int(acc.ReservedMemory)
+			expected = -1
+			if got != expected {
+				t.Errorf("Expected: %v, got: %v", expected, got)
+			}
+			got = int(acc.ReservedStore)
+			expected = -1
+			if got != expected {
+				t.Errorf("Expected: %v, got: %v", expected, got)
 			}
 		}
 	})
@@ -4192,6 +4334,57 @@ func TestMonitorJsz(t *testing.T) {
 			}
 		}
 	})
+	t.Run("replication", func(t *testing.T) {
+		// The replication lag may only be present on the leader
+		replicationFound := false
+		for _, url := range []string{monUrl1, monUrl2} {
+			info := readJsInfo(url + "?acc=ACC&streams=true")
+			if len(info.AccountDetails) != 1 {
+				t.Fatalf("expected account ACC to be returned by %s but got %v", url, info)
+			}
+			streamFound := false
+			for _, stream := range info.AccountDetails[0].Streams {
+				if stream.Name == "my-stream-mirror" {
+					streamFound = true
+					if stream.Mirror != nil {
+						replicationFound = true
+					}
+				}
+			}
+			if !streamFound {
+				t.Fatalf("Did not locate my-stream-mirror stream in results")
+			}
+		}
+		if !replicationFound {
+			t.Fatal("ReplicationLag expected to be present for my-stream-mirror stream")
+		}
+	})
+	t.Run("cluster-info", func(t *testing.T) {
+		found := 0
+		for i, url := range []string{monUrl1, monUrl2} {
+			info := readJsInfo(url + "")
+			if info.Meta.Peer != getHash(info.Meta.Leader) {
+				t.Fatalf("Invalid Peer: %+v", info.Meta)
+			}
+			if info.Meta.Replicas != nil {
+				found++
+				for _, r := range info.Meta.Replicas {
+					if r.Peer == _EMPTY_ {
+						t.Fatalf("Replicas' Peer is empty: %+v", r)
+					}
+				}
+				if info.Meta.Leader != srvs[i].Name() {
+					t.Fatalf("received cluster info from non leader: leader %s, server: %s", info.Meta.Leader, srvs[i].Name())
+				}
+			}
+		}
+		if found == 0 {
+			t.Fatalf("did not receive cluster info from any node")
+		}
+		if found > 1 {
+			t.Fatalf("received cluster info from multiple nodes")
+		}
+	})
 	t.Run("account-non-existing", func(t *testing.T) {
 		for _, url := range []string{monUrl1, monUrl2} {
 			info := readJsInfo(url + "?acc=DOES_NOT_EXIT")
@@ -4210,6 +4403,10 @@ func TestMonitorReloadTLSConfig(t *testing.T) {
 			cert_file: '%s'
 			key_file: '%s'
 			ca_file: '../test/configs/certs/ca.pem'
+
+			# Set this to make sure that it does not impact secure monitoring
+			# (which it did, see issue: https://github.com/nats-io/nats-server/issues/2980)
+			verify_and_map: true
 		}
 	`
 	conf := createConfFile(t, []byte(fmt.Sprintf(template,
@@ -4254,5 +4451,111 @@ func TestMonitorReloadTLSConfig(t *testing.T) {
 	c = tls.Client(c, tlsConfig.Clone())
 	if err := c.(*tls.Conn).Handshake(); err != nil {
 		t.Fatalf("Error on TLS handshake: %v", err)
+	}
+
+	// Need to read something to see if there is a problem with the certificate or not.
+	var buf [64]byte
+	c.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	_, err = c.Read(buf[:])
+	if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		t.Fatalf("Error: %v", err)
+	}
+}
+
+func TestMonitorMQTT(t *testing.T) {
+	o := DefaultOptions()
+	o.HTTPHost = "127.0.0.1"
+	o.HTTPPort = -1
+	o.ServerName = "mqtt_server"
+	o.Users = []*User{{Username: "someuser"}}
+	pinnedCerts := make(PinnedCertSet)
+	pinnedCerts["7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"] = struct{}{}
+	o.MQTT = MQTTOpts{
+		Host:           "127.0.0.1",
+		Port:           -1,
+		NoAuthUser:     "someuser",
+		JsDomain:       "js",
+		AuthTimeout:    2.0,
+		TLSMap:         true,
+		TLSTimeout:     3.0,
+		TLSPinnedCerts: pinnedCerts,
+		AckWait:        4 * time.Second,
+		MaxAckPending:  256,
+	}
+	s := RunServer(o)
+	defer s.Shutdown()
+
+	expected := &MQTTOptsVarz{
+		Host:           "127.0.0.1",
+		Port:           o.MQTT.Port,
+		NoAuthUser:     "someuser",
+		JsDomain:       "js",
+		AuthTimeout:    2.0,
+		TLSMap:         true,
+		TLSTimeout:     3.0,
+		TLSPinnedCerts: []string{"7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"},
+		AckWait:        4 * time.Second,
+		MaxAckPending:  256,
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/varz", s.MonitorAddr().Port)
+	for mode := 0; mode < 2; mode++ {
+		v := pollVarz(t, s, mode, url, nil)
+		vm := &v.MQTT
+		if !reflect.DeepEqual(vm, expected) {
+			t.Fatalf("Expected\n%+v\nGot:\n%+v", expected, vm)
+		}
+	}
+}
+
+func TestMonitorWebsocket(t *testing.T) {
+	o := DefaultOptions()
+	o.HTTPHost = "127.0.0.1"
+	o.HTTPPort = -1
+	kp, _ := nkeys.FromSeed(oSeed)
+	pub, _ := kp.PublicKey()
+	o.TrustedKeys = []string{pub}
+	o.Users = []*User{{Username: "someuser"}}
+	pinnedCerts := make(PinnedCertSet)
+	pinnedCerts["7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"] = struct{}{}
+	o.Websocket = WebsocketOpts{
+		Host:             "127.0.0.1",
+		Port:             -1,
+		Advertise:        "somehost:8080",
+		NoAuthUser:       "someuser",
+		JWTCookie:        "somecookiename",
+		AuthTimeout:      2.0,
+		NoTLS:            true,
+		TLSMap:           true,
+		TLSPinnedCerts:   pinnedCerts,
+		SameOrigin:       true,
+		AllowedOrigins:   []string{"origin1", "origin2"},
+		Compression:      true,
+		HandshakeTimeout: 4 * time.Second,
+	}
+	s := RunServer(o)
+	defer s.Shutdown()
+
+	expected := &WebsocketOptsVarz{
+		Host:             "127.0.0.1",
+		Port:             o.Websocket.Port,
+		Advertise:        "somehost:8080",
+		NoAuthUser:       "someuser",
+		JWTCookie:        "somecookiename",
+		AuthTimeout:      2.0,
+		NoTLS:            true,
+		TLSMap:           true,
+		TLSPinnedCerts:   []string{"7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"},
+		SameOrigin:       true,
+		AllowedOrigins:   []string{"origin1", "origin2"},
+		Compression:      true,
+		HandshakeTimeout: 4 * time.Second,
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/varz", s.MonitorAddr().Port)
+	for mode := 0; mode < 2; mode++ {
+		v := pollVarz(t, s, mode, url, nil)
+		vw := &v.Websocket
+		if !reflect.DeepEqual(vw, expected) {
+			t.Fatalf("Expected\n%+v\nGot:\n%+v", expected, vw)
+		}
 	}
 }

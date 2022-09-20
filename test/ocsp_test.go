@@ -22,7 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -102,6 +102,7 @@ func TestOCSPAlwaysMustStapleAndShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -199,6 +200,7 @@ func TestOCSPMustStapleShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -616,6 +618,7 @@ func TestOCSPReloadRotateTLSCertWithNoURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -641,7 +644,7 @@ func TestOCSPReloadRotateTLSCertWithNoURL(t *testing.T) {
 			timeout: 5
 		}
 	`
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	// Reload show warning because of cert missing OCSP Url so cannot be used
@@ -690,7 +693,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	originalContent := `
 		port: -1
 
-		store_dir: "%s"
+		store_dir: '%s'
 
 		tls {
 			cert_file: "configs/certs/ocsp/server-status-request-url-01-cert.pem"
@@ -727,6 +730,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -753,7 +757,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	}
 	found := false
 	for _, file := range files {
-		data, err := ioutil.ReadFile(file)
+		data, err := os.ReadFile(file)
 		if err != nil {
 			t.Error(err)
 		}
@@ -769,7 +773,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	updatedContent := `
 		port: -1
 
-		store_dir: "%s"
+		store_dir: '%s'
 
 		tls {
 			cert_file: "configs/certs/ocsp/server-cert.pem"
@@ -779,7 +783,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 		}
 	`
 	content = fmt.Sprintf(updatedContent, storeDir)
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := s.Reload(); err != nil {
@@ -808,7 +812,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 
 	// Re-enable OCSP Stapling
 	content = fmt.Sprintf(originalContent, storeDir)
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := s.Reload(); err != nil {
@@ -852,7 +856,7 @@ func TestOCSPReloadRotateTLSCertDisableMustStaple(t *testing.T) {
 	}
 	found = false
 	for _, file := range files {
-		data, err := ioutil.ReadFile(file)
+		data, err := os.ReadFile(file)
 		if err != nil {
 			t.Error(err)
 		}
@@ -914,6 +918,7 @@ func TestOCSPReloadRotateTLSCertEnableMustStaple(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -938,7 +943,7 @@ func TestOCSPReloadRotateTLSCertEnableMustStaple(t *testing.T) {
 			timeout: 5
 		}
 	`
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := s.Reload(); err != nil {
@@ -1010,7 +1015,7 @@ func TestOCSPCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		cluster {
 			name: AB
 			host: "127.0.0.1"
@@ -1044,7 +1049,7 @@ func TestOCSPCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		cluster {
 			name: AB
 			host: "127.0.0.1"
@@ -1111,7 +1116,7 @@ func TestOCSPCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		cluster {
 			name: AB
 			host: "127.0.0.1"
@@ -1206,7 +1211,7 @@ func TestOCSPCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		cluster {
 			port: -1
 			name: AB
@@ -1223,7 +1228,7 @@ func TestOCSPCluster(t *testing.T) {
 		}
 	`
 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
-	if err := ioutil.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
+	if err := os.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := srvA.Reload(); err != nil {
@@ -1284,7 +1289,7 @@ func TestOCSPLeaf(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		leafnodes {
 			host: "127.0.0.1"
 			port: -1
@@ -1317,7 +1322,7 @@ func TestOCSPLeaf(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		leafnodes {
 			remotes: [ {
 				url: "tls://127.0.0.1:%d"
@@ -1378,7 +1383,7 @@ func TestOCSPLeaf(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		leafnodes {
 			remotes: [ {
 				url: "tls://127.0.0.1:%d"
@@ -1468,7 +1473,7 @@ func TestOCSPLeaf(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		leafnodes {
 			host: "127.0.0.1"
 			port: -1
@@ -1483,7 +1488,7 @@ func TestOCSPLeaf(t *testing.T) {
 		}
 	`
 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
-	if err := ioutil.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
+	if err := os.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := srvA.Reload(); err != nil {
@@ -1555,7 +1560,7 @@ func TestOCSPGateway(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: A
 			host: "127.0.0.1"
@@ -1589,7 +1594,7 @@ func TestOCSPGateway(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: B
 			host: "127.0.0.1"
@@ -1662,7 +1667,7 @@ func TestOCSPGateway(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: C
 			host: "127.0.0.1"
@@ -1758,7 +1763,7 @@ func TestOCSPGateway(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: A
 			host: "127.0.0.1"
@@ -1775,7 +1780,7 @@ func TestOCSPGateway(t *testing.T) {
 	`
 
 	srvConfA = fmt.Sprintf(srvConfA, storeDirA)
-	if err := ioutil.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
+	if err := os.WriteFile(sconfA, []byte(srvConfA), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := srvA.Reload(); err != nil {
@@ -2214,6 +2219,7 @@ func TestOCSPCustomConfigReloadDisable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -2240,7 +2246,7 @@ func TestOCSPCustomConfigReloadDisable(t *testing.T) {
 			timeout: 5
 		}
 	`
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := s.Reload(); err != nil {
@@ -2316,6 +2322,7 @@ func TestOCSPCustomConfigReloadEnable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nc.Close()
 	sub, err := nc.SubscribeSync("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -2342,7 +2349,7 @@ func TestOCSPCustomConfigReloadEnable(t *testing.T) {
 			timeout: 5
 		}
 	`
-	if err := ioutil.WriteFile(conf, []byte(content), 0666); err != nil {
+	if err := os.WriteFile(conf, []byte(content), 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 	if err := s.Reload(); err != nil {
@@ -2400,7 +2407,7 @@ func newOCSPResponderDesignated(t *testing.T, issuerCertPEM, respCertPEM, respKe
 
 			fmt.Fprintf(rw, "%s %d", key, n)
 		case "POST":
-			data, err := ioutil.ReadAll(r.Body)
+			data, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(rw, err.Error(), http.StatusBadRequest)
 				return
@@ -2496,7 +2503,7 @@ func setOCSPStatus(t *testing.T, ocspURL, certPEM string, status int) {
 	}
 	defer resp.Body.Close()
 
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("failed to read OCSP HTTP response body: %s", err)
 	}
@@ -2531,7 +2538,7 @@ func parseKeyPEM(t *testing.T, keyPEM string) *rsa.PrivateKey {
 
 func parsePEM(t *testing.T, pemPath string) *pem.Block {
 	t.Helper()
-	data, err := ioutil.ReadFile(pemPath)
+	data, err := os.ReadFile(pemPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2623,7 +2630,7 @@ func TestOCSPSuperCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 
 		cluster {
 			name: A
@@ -2675,7 +2682,7 @@ func TestOCSPSuperCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 
 		cluster {
 			name: A
@@ -2748,7 +2755,7 @@ func TestOCSPSuperCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: C
 			host: "127.0.0.1"
@@ -2798,7 +2805,7 @@ func TestOCSPSuperCluster(t *testing.T) {
 			ca_file: "configs/certs/ocsp/ca-cert.pem"
 			timeout: 5
 		}
-		store_dir: "%s"
+		store_dir: '%s'
 		gateway {
 			name: D
 			host: "127.0.0.1"

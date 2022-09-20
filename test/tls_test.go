@@ -19,16 +19,17 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+
+	"github.com/nats-io/nats-server/v2/server"
 )
 
 var noOpErrHandler = func(_ *nats.Conn, _ *nats.Subscription, _ error) {}
@@ -91,7 +92,7 @@ func TestTLSClientCertificate(t *testing.T) {
 	}
 
 	// Load in root CA for server verification
-	rootPEM, err := ioutil.ReadFile("./configs/certs/ca.pem")
+	rootPEM, err := os.ReadFile("./configs/certs/ca.pem")
 	if err != nil || rootPEM == nil {
 		t.Fatalf("failed to read root certificate")
 	}
@@ -1228,6 +1229,7 @@ func TestTLSClientAuthWithRDNSequence(t *testing.T) {
 		rerr   error
 	}{
 		// To generate certs for these tests:
+		// USE `regenerate_rdns_svid.sh` TO REGENERATE
 		//
 		// ```
 		// openssl req -newkey rsa:2048  -nodes -keyout client-$CLIENT_ID.key -subj "/C=US/ST=CA/L=Los Angeles/OU=NATS/O=NATS/CN=*.example.com/DC=example/DC=com" -addext extendedKeyUsage=clientAuth -out client-$CLIENT_ID.csr
@@ -1455,7 +1457,7 @@ func TestTLSClientAuthWithRDNSequence(t *testing.T) {
 				}
 			`,
 			//
-			// OpenSSL: -subj "/DC=org/DC=OpenSSL/DC=DEV+O=users/CN=John Doe"
+			// OpenSSL: -subj "/DC=org/DC=OpenSSL/DC=DEV+O=users/CN=John Doe" -multivalue-rdn
 			// Go:       CN=John Doe,O=users
 			// RFC2253:  CN=John Doe,DC=DEV+O=users,DC=OpenSSL,DC=org
 			//
@@ -1840,7 +1842,7 @@ func TestTLSPinnedCertsClient(t *testing.T) {
 		t.Fatalf("Expected error trying to connect without a certificate in pinned_certs")
 	}
 
-	ioutil.WriteFile(confFileName, []byte(fmt.Sprintf(tmpl, "bf6f821f09fde09451411ba3b42c0f74727d61a974c69fd3cf5257f39c75f0e9")), 0660)
+	os.WriteFile(confFileName, []byte(fmt.Sprintf(tmpl, "bf6f821f09fde09451411ba3b42c0f74727d61a974c69fd3cf5257f39c75f0e9")), 0660)
 	if err := srv.Reload(); err != nil {
 		t.Fatalf("on Reload got %v", err)
 	}
@@ -1963,7 +1965,7 @@ func TestTLSPinnedCertsRoute(t *testing.T) {
 	checkClusterFormed(t, srvSeed, srv)
 
 	// this change will result in the server being and remaining disconnected
-	ioutil.WriteFile(confSrv, []byte(fmt.Sprintf(tmplSrv, o.Cluster.Port, "aaaaaaaa09fde09451411ba3b42c0f74727d61a974c69fd3cf5257f39c75f0e9")), 0660)
+	os.WriteFile(confSrv, []byte(fmt.Sprintf(tmplSrv, o.Cluster.Port, "aaaaaaaa09fde09451411ba3b42c0f74727d61a974c69fd3cf5257f39c75f0e9")), 0660)
 	if err := srv.Reload(); err != nil {
 		t.Fatalf("on Reload got %v", err)
 	}

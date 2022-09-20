@@ -285,7 +285,7 @@ func TestServerRoutesWithAuthAndBCrypt(t *testing.T) {
 }
 
 // Helper function to check that a cluster is formed
-func checkClusterFormed(t *testing.T, servers ...*Server) {
+func checkClusterFormed(t testing.TB, servers ...*Server) {
 	t.Helper()
 	expectedNumRoutes := len(servers) - 1
 	checkFor(t, 10*time.Second, 100*time.Millisecond, func() error {
@@ -794,6 +794,7 @@ func TestServerPoolUpdatedWhenRouteGoesAway(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error on connect")
 	}
+	defer nc.Close()
 
 	s2Opts := DefaultOptions()
 	s2Opts.ServerName = "B"
@@ -1095,7 +1096,7 @@ func TestRouteNoCrashOnAddingSubToRoute(t *testing.T) {
 
 	// Make sure all subs are registered in s.
 	checkFor(t, time.Second, 15*time.Millisecond, func() error {
-		if ts := s.globalAccount().TotalSubs() - 3; ts != int(numRoutes) {
+		if ts := s.globalAccount().TotalSubs() - 4; ts != int(numRoutes) {
 			return fmt.Errorf("Not all %d routed subs were registered: %d", numRoutes, ts)
 		}
 		return nil
@@ -1465,6 +1466,7 @@ func testTLSRoutesCertificateImplicitAllow(t *testing.T, pass bool) {
 	if err := cfg.Sync(); err != nil {
 		t.Fatal(err)
 	}
+	cfg.Close()
 
 	optsA := LoadConfig(cfg.Name())
 	optsB := LoadConfig(cfg.Name())
@@ -1507,4 +1509,87 @@ func testTLSRoutesCertificateImplicitAllow(t *testing.T, pass bool) {
 			return nil
 		})
 	}
+}
+
+func TestSubjectRenameViaJetStreamAck(t *testing.T) {
+	s := RunRandClientPortServer()
+	defer s.Shutdown()
+	errChan := make(chan error)
+	defer close(errChan)
+	ncPub := natsConnect(t, s.ClientURL(), nats.UserInfo("client", "pwd"),
+		nats.ErrorHandler(func(conn *nats.Conn, s *nats.Subscription, err error) {
+			errChan <- err
+		}))
+	defer ncPub.Close()
+	require_NoError(t, ncPub.PublishRequest("SVC.ALLOWED", "$JS.ACK.whatever@ADMIN", nil))
+	select {
+	case err := <-errChan:
+		require_Contains(t, err.Error(), "Permissions Violation for Publish with Reply of")
+	case <-time.After(time.Second):
+		t.Fatalf("Expected error")
+	}
+}
+
+func TestClusterQueueGroupWeightTrackingLeak(t *testing.T) {
+	o := DefaultOptions()
+	o.ServerName = "A"
+	s := RunServer(o)
+	defer s.Shutdown()
+
+	o2 := DefaultOptions()
+	o2.ServerName = "B"
+	o2.Routes = RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%d", o.Cluster.Port))
+	s2 := RunServer(o2)
+	defer s2.Shutdown()
+
+	nc := natsConnect(t, s.ClientURL())
+	defer nc.Close()
+
+	// Create a queue subscription
+	sub := natsQueueSubSync(t, nc, "foo", "bar")
+
+	// Check on s0 that we have the proper queue weight info
+	acc := s.GlobalAccount()
+
+	check := func(present bool, expected int32) {
+		t.Helper()
+		checkFor(t, time.Second, 15*time.Millisecond, func() error {
+			acc.mu.RLock()
+			v, ok := acc.lqws["foo bar"]
+			acc.mu.RUnlock()
+			if present {
+				if !ok {
+					return fmt.Errorf("the key is not present")
+				}
+				if v != expected {
+					return fmt.Errorf("lqws doest not contain expected value of %v: %v", expected, v)
+				}
+			} else if ok {
+				return fmt.Errorf("the key is present with value %v and should not be", v)
+			}
+			return nil
+		})
+	}
+	check(true, 1)
+
+	// Now unsub, and it should be removed, not just be 0
+	sub.Unsubscribe()
+	check(false, 0)
+
+	// Still make sure that the subject interest is gone from both servers.
+	checkSubGone := func(s *Server) {
+		t.Helper()
+		checkFor(t, time.Second, 15*time.Millisecond, func() error {
+			acc := s.GlobalAccount()
+			acc.mu.RLock()
+			res := acc.sl.Match("foo")
+			acc.mu.RUnlock()
+			if res != nil && len(res.qsubs) > 0 {
+				return fmt.Errorf("Found queue sub on foo for server %v", s)
+			}
+			return nil
+		})
+	}
+	checkSubGone(s)
+	checkSubGone(s2)
 }
