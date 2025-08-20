@@ -1,6 +1,6 @@
-FROM golang:1.22.4-alpine3.20 AS builder
+FROM golang:1.25.0-alpine3.22 AS builder
 
-ENV NATS_SERVER 2.6.1
+ENV NATS_SERVER 2.11.8
 
 RUN apk add --update --no-cache build-base libc6-compat
 

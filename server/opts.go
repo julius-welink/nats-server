@@ -383,7 +383,7 @@ type Options struct {
 	// INFO protocol first. It allows for a mix of newer clients that can
 	// require a TLS handshake first, and older clients that can't.
 	TLSHandshakeFirstFallback time.Duration `json:"-"`
-	TLSRateLimitWhitelist string            `json:"-"`
+	TLSRateLimitWhitelist     string        `json:"-"`
 	AllowNonTLS               bool          `json:"-"`
 	WriteDeadline             time.Duration `json:"-"`
 	MaxClosedClients          int           `json:"-"`
@@ -738,7 +738,8 @@ type TLSConfigOpts struct {
 	FallbackDelay        time.Duration // Where supported, indicates how long to wait for the handshake before falling back to sending the INFO protocol first.
 	Timeout              float64
 	RateLimit            int64
-	RateLimitWhiteList stringCiphers              []uint16
+	RateLimitWhiteList   string
+	Ciphers              []uint16
 	CurvePreferences     []tls.CurveID
 	PinnedCerts          PinnedCertSet
 	CertStore            certstore.StoreType
