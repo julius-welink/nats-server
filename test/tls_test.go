@@ -1,4 +1,4 @@
-// Copyright 2015-2020 The NATS Authors
+// Copyright 2015-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -66,9 +66,30 @@ func TestTLSConnection(t *testing.T) {
 
 	nc.Publish(subj, []byte("We are Secure!"))
 	nc.Flush()
-	nmsgs, _ := sub.QueuedMsgs()
+	nmsgs, _, _ := sub.Pending()
 	if nmsgs != 1 {
 		t.Fatalf("Expected to receive a message over the TLS connection")
+	}
+}
+
+// TestTLSInProcessConnection checks that even if TLS is enabled on the server,
+// that an in-process connection that does *not* use TLS still connects successfully.
+func TestTLSInProcessConnection(t *testing.T) {
+	srv, opts := RunServerWithConfig("./configs/tls.conf")
+	defer srv.Shutdown()
+
+	nc, err := nats.Connect("", nats.InProcessServer(srv), nats.UserInfo(opts.Username, opts.Password))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+
+	if nc.TLSRequired() {
+		t.Fatalf("Shouldn't have required TLS for in-process connection")
+	}
+
+	if _, err = nc.TLSConnectionState(); err == nil {
+		t.Fatal("Should have got an error retrieving TLS connection state")
 	}
 }
 
@@ -152,7 +173,6 @@ func TestTLSClientCertificateCheckWithAllowedConnectionTypes(t *testing.T) {
 			]
 		}
 	`))
-	defer removeFile(t, conf)
 	s, o := RunServerWithConfig(conf)
 	defer s.Shutdown()
 
@@ -1080,7 +1100,7 @@ func TestTLSConnectionCurvePref(t *testing.T) {
 
 	nc.Publish(subj, []byte("We are Secure!"))
 	nc.Flush()
-	nmsgs, _ := sub.QueuedMsgs()
+	nmsgs, _, _ := sub.Pending()
 	if nmsgs != 1 {
 		t.Fatalf("Expected to receive a message over the TLS connection")
 	}
@@ -1092,7 +1112,7 @@ type captureSlowConsumerLogger struct {
 	gotIt bool
 }
 
-func (l *captureSlowConsumerLogger) Noticef(format string, v ...interface{}) {
+func (l *captureSlowConsumerLogger) Noticef(format string, v ...any) {
 	msg := fmt.Sprintf(format, v...)
 	if strings.Contains(msg, "Slow Consumer") {
 		l.Lock()
@@ -1181,7 +1201,6 @@ func TestTLSHandshakeFailureMemUsage(t *testing.T) {
 				}
 			`)
 			conf := createConfFile(t, []byte(content))
-			defer removeFile(t, conf)
 			s, opts := RunServerWithConfig(conf)
 			defer s.Shutdown()
 
@@ -1519,7 +1538,6 @@ func TestTLSClientAuthWithRDNSequence(t *testing.T) {
 				}
 			`)
 			conf := createConfFile(t, []byte(content))
-			defer removeFile(t, conf)
 			s, opts := RunServerWithConfig(conf)
 			defer s.Shutdown()
 
@@ -1639,7 +1657,6 @@ func TestTLSClientAuthWithRDNSequenceReordered(t *testing.T) {
 				}
 			`)
 			conf := createConfFile(t, []byte(content))
-			defer removeFile(t, conf)
 			s, opts := RunServerWithConfig(conf)
 			defer s.Shutdown()
 
@@ -1772,7 +1789,6 @@ func TestTLSClientSVIDAuth(t *testing.T) {
 				}
 			`)
 			conf := createConfFile(t, []byte(content))
-			defer removeFile(t, conf)
 			s, opts := RunServerWithConfig(conf)
 			defer s.Shutdown()
 
@@ -1823,7 +1839,6 @@ func TestTLSPinnedCertsClient(t *testing.T) {
 	}`
 
 	confFileName := createConfFile(t, []byte(fmt.Sprintf(tmpl, "aaaaaaaa09fde09451411ba3b42c0f74727d61a974c69fd3cf5257f39c75f0e9")))
-	defer removeFile(t, confFileName)
 	srv, o := RunServerWithConfig(confFileName)
 	defer srv.Shutdown()
 
@@ -1865,7 +1880,7 @@ func newCaptureWarnLogger() *captureWarnLogger {
 	}
 }
 
-func (l *captureWarnLogger) Warnf(format string, v ...interface{}) {
+func (l *captureWarnLogger) Warnf(format string, v ...any) {
 	l.receive <- fmt.Sprintf(format, v...)
 }
 
@@ -1893,7 +1908,6 @@ func TestTLSConnectionRate(t *testing.T) {
 	`
 
 	confFileName := createConfFile(t, []byte(config))
-	defer removeFile(t, confFileName)
 
 	srv, _ := RunServerWithConfig(confFileName)
 	logger := newCaptureWarnLogger()
@@ -1928,6 +1942,7 @@ func TestTLSPinnedCertsRoute(t *testing.T) {
 	port: -1
 	cluster {
 		port: -1
+		pool_size: -1
 		tls {
 			ca_file: "configs/certs/ca.pem"
 			cert_file: "configs/certs/server-cert.pem"
@@ -1953,12 +1968,10 @@ func TestTLSPinnedCertsRoute(t *testing.T) {
 	}`
 
 	confSeed := createConfFile(t, []byte(tmplSeed))
-	defer removeFile(t, confSeed)
 	srvSeed, o := RunServerWithConfig(confSeed)
 	defer srvSeed.Shutdown()
 
 	confSrv := createConfFile(t, []byte(fmt.Sprintf(tmplSrv, o.Cluster.Port, "89386860ea1222698ea676fc97310bdf2bff6f7e2b0420fac3b3f8f5a08fede5")))
-	defer removeFile(t, confSrv)
 	srv, _ := RunServerWithConfig(confSrv)
 	defer srv.Shutdown()
 
@@ -1972,4 +1985,40 @@ func TestTLSPinnedCertsRoute(t *testing.T) {
 
 	checkNumRoutes(t, srvSeed, 0)
 	checkNumRoutes(t, srv, 0)
+}
+
+func TestAllowNonTLSReload(t *testing.T) {
+	tmpl := `
+		listen: "127.0.0.1:-1"
+		ping_interval: "%s"
+		tls {
+			ca_file: "configs/certs/ca.pem"
+			cert_file: "configs/certs/server-cert.pem"
+			key_file: "configs/certs/server-key.pem"
+		}
+		allow_non_tls: true
+	`
+	conf := createConfFile(t, []byte(fmt.Sprintf(tmpl, "10s")))
+	s, o := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	check := func() {
+		t.Helper()
+		nc := createClientConn(t, "127.0.0.1", o.Port)
+		defer nc.Close()
+		info := checkInfoMsg(t, nc)
+		if !info.TLSAvailable {
+			t.Fatal("TLSAvailable should be true, was false")
+		}
+		if info.TLSRequired {
+			t.Fatal("TLSRequired should be false, was true")
+		}
+	}
+	check()
+
+	os.WriteFile(conf, []byte(fmt.Sprintf(tmpl, "20s")), 0660)
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Error on reload: %v", err)
+	}
+	check()
 }

@@ -1,4 +1,4 @@
-// Copyright 2016-2020 The NATS Authors
+// Copyright 2016-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -131,25 +131,25 @@ type dummyLogger struct {
 	msg string
 }
 
-func (d *dummyLogger) Fatalf(format string, args ...interface{}) {
+func (d *dummyLogger) Fatalf(format string, args ...any) {
 	d.Lock()
 	d.msg = fmt.Sprintf(format, args...)
 	d.Unlock()
 }
 
-func (d *dummyLogger) Errorf(format string, args ...interface{}) {
+func (d *dummyLogger) Errorf(format string, args ...any) {
 }
 
-func (d *dummyLogger) Debugf(format string, args ...interface{}) {
+func (d *dummyLogger) Debugf(format string, args ...any) {
 }
 
-func (d *dummyLogger) Tracef(format string, args ...interface{}) {
+func (d *dummyLogger) Tracef(format string, args ...any) {
 }
 
-func (d *dummyLogger) Noticef(format string, args ...interface{}) {
+func (d *dummyLogger) Noticef(format string, args ...any) {
 }
 
-func (d *dummyLogger) Warnf(format string, args ...interface{}) {
+func (d *dummyLogger) Warnf(format string, args ...any) {
 }
 
 func TestStackFatal(t *testing.T) {

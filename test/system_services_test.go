@@ -1,4 +1,4 @@
-// Copyright 2019 The NATS Authors
+// Copyright 2019-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -262,7 +262,7 @@ func TestSystemServiceSubscribersLeafNodesWithoutSystem(t *testing.T) {
 	// For now we do not see all the details behind a leafnode if the leafnode is not enabled.
 	checkDbgNumSubs(t, nc, "foo.bar.3", 2)
 
-	checkDbgNumSubs(t, nc, "foo.bar.baz QG.22", 11)
+	checkDbgNumSubs(t, nc, "foo.bar.baz QG.22", 12)
 }
 
 func runSolicitLeafServerWithSystemToURL(surl string) (*server.Server, *server.Options) {

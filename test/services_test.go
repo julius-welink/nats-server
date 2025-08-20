@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -42,7 +42,6 @@ var basicMASetupContents = []byte(`
 
 func TestServiceImportWithStreamed(t *testing.T) {
 	conf := createConfFile(t, basicMASetupContents)
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -140,7 +139,6 @@ func TestServiceImportWithStreamed(t *testing.T) {
 
 func TestServiceImportWithStreamedResponseAndEOF(t *testing.T) {
 	conf := createConfFile(t, basicMASetupContents)
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -224,7 +222,6 @@ func TestServiceExportsResponseFiltering(t *testing.T) {
 		    }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -292,7 +289,6 @@ func TestServiceExportsAutoDirectCleanup(t *testing.T) {
 		    }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -390,7 +386,6 @@ func TestServiceExportsPruningCleanup(t *testing.T) {
 		    }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -479,7 +474,6 @@ func TestServiceExportsResponseThreshold(t *testing.T) {
 		    },
 		}
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -525,7 +519,6 @@ func TestServiceExportsResponseThresholdChunked(t *testing.T) {
 		    }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -588,7 +581,6 @@ func TestServiceAllowResponsesPerms(t *testing.T) {
 		    }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()

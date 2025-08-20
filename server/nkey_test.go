@@ -1,4 +1,4 @@
-// Copyright 2018 The NATS Authors
+// Copyright 2018-2024 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,14 +15,15 @@ package server
 
 import (
 	"bufio"
-	crand "crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	mrand "math/rand"
 	"strings"
 	"testing"
 	"time"
+
+	crand "crypto/rand"
+	mrand "math/rand"
 
 	"github.com/nats-io/nkeys"
 )
@@ -234,7 +235,6 @@ func TestMixedClientConfig(t *testing.T) {
         {user: alice, password: foo}
       ]
     }`))
-	defer removeFile(t, confFileName)
 	opts, err := ProcessConfigFile(confFileName)
 	if err != nil {
 		t.Fatalf("Received an error processing config file: %v", err)
@@ -275,7 +275,7 @@ func BenchmarkNonceGeneration(b *testing.B) {
 func BenchmarkPublicVerify(b *testing.B) {
 	data := make([]byte, nonceRawLen)
 	nonce := make([]byte, nonceLen)
-	mrand.Read(data)
+	crand.Read(data)
 	base64.RawURLEncoding.Encode(nonce, data)
 
 	user, err := nkeys.CreateUser()

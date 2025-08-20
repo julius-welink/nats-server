@@ -1,4 +1,4 @@
-// Copyright 2019-2021 The NATS Authors
+// Copyright 2019-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,14 +14,17 @@
 package server
 
 import (
-	"bytes"
+	"cmp"
 	"fmt"
 	"math/rand"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats-server/v2/internal/antithesis"
 )
 
 // DefaultTestOptions are default options for the unit tests.
@@ -32,6 +35,7 @@ var DefaultTestOptions = Options{
 	NoSigs:                true,
 	MaxControlLine:        4096,
 	DisableShortFirstPing: true,
+	NoJetStreamStrict:     false,
 }
 
 func testDefaultClusterOptionsForLeafNodes() *Options {
@@ -46,30 +50,25 @@ func testDefaultClusterOptionsForLeafNodes() *Options {
 	return &o
 }
 
-func RunRandClientPortServer() *Server {
+func RunRandClientPortServer(t *testing.T) *Server {
 	opts := DefaultTestOptions
 	opts.Port = -1
+	opts.StoreDir = t.TempDir()
 	return RunServer(&opts)
 }
 
-// Used to setup clusters of clusters for tests.
-type cluster struct {
-	servers []*Server
-	opts    []*Options
-	name    string
-	t       testing.TB
-}
-
-func require_True(t *testing.T, b bool) {
+func require_True(t testing.TB, b bool) {
 	t.Helper()
 	if !b {
+		antithesis.AssertUnreachable(t, "Failed require_True check", nil)
 		t.Fatalf("require true, but got false")
 	}
 }
 
-func require_False(t *testing.T, b bool) {
+func require_False(t testing.TB, b bool) {
 	t.Helper()
 	if b {
+		antithesis.AssertUnreachable(t, "Failed require_False check", nil)
 		t.Fatalf("require false, but got true")
 	}
 }
@@ -77,7 +76,25 @@ func require_False(t *testing.T, b bool) {
 func require_NoError(t testing.TB, err error) {
 	t.Helper()
 	if err != nil {
+		antithesis.AssertUnreachable(t, "Failed require_NoError check", map[string]any{
+			"error": err.Error(),
+		})
 		t.Fatalf("require no error, but got: %v", err)
+	}
+}
+
+func require_NotNil[T any](t testing.TB, vs ...T) {
+	t.Helper()
+	for _, v := range vs {
+		r := reflect.ValueOf(v)
+		switch k := r.Kind(); k {
+		case reflect.Ptr, reflect.Interface, reflect.Slice,
+			reflect.Map, reflect.Chan, reflect.Func:
+			if r.IsNil() {
+				antithesis.AssertUnreachable(t, "Failed require_NotNil check", nil)
+				t.Fatalf("require not nil, but got nil")
+			}
+		}
 	}
 }
 
@@ -85,14 +102,19 @@ func require_Contains(t *testing.T, s string, subStrs ...string) {
 	t.Helper()
 	for _, subStr := range subStrs {
 		if !strings.Contains(s, subStr) {
+			antithesis.AssertUnreachable(t, "Failed require_Contains check", map[string]any{
+				"string":      s,
+				"sub_strings": subStr,
+			})
 			t.Fatalf("require %q to be contained in %q", subStr, s)
 		}
 	}
 }
 
-func require_Error(t *testing.T, err error, expected ...error) {
+func require_Error(t testing.TB, err error, expected ...error) {
 	t.Helper()
 	if err == nil {
+		antithesis.AssertUnreachable(t, "Failed require_Error check (nil error)", nil)
 		t.Fatalf("require error, but got none")
 	}
 	if len(expected) == 0 {
@@ -106,31 +128,68 @@ func require_Error(t *testing.T, err error, expected ...error) {
 	}
 
 	for _, e := range expected {
-		if err == e || strings.Contains(e.Error(), eStr) {
+		if err == e || strings.Contains(eStr, e.Error()) || strings.Contains(e.Error(), eStr) {
 			return
 		}
 	}
-	t.Fatalf("Expected one of %+v, got '%v'", expected, err)
+
+	antithesis.AssertUnreachable(t, "Failed require_Error check (unexpected error)", map[string]any{
+		"error": err.Error(),
+	})
+	t.Fatalf("Expected one of %v, got '%v'", expected, err)
 }
 
-func require_Equal(t *testing.T, a, b string) {
-	t.Helper()
-	if strings.Compare(a, b) != 0 {
-		t.Fatalf("require equal, but got: %v != %v", a, b)
-	}
-}
-
-func require_NotEqual(t *testing.T, a, b [32]byte) {
-	t.Helper()
-	if bytes.Equal(a[:], b[:]) {
-		t.Fatalf("require not equal, but got: %v != %v", a, b)
-	}
-}
-
-func require_Len(t *testing.T, a, b int) {
+func require_Equal[T comparable](t testing.TB, a, b T) {
 	t.Helper()
 	if a != b {
+		antithesis.AssertUnreachable(t, "Failed require_Equal check", nil)
+		t.Fatalf("require %T equal, but got: %v != %v", a, a, b)
+	}
+}
+
+func require_NotEqual[T comparable](t testing.TB, a, b T) {
+	t.Helper()
+	if a == b {
+		antithesis.AssertUnreachable(t, "Failed require_NotEqual check", nil)
+		t.Fatalf("require %T not equal, but got: %v == %v", a, a, b)
+	}
+}
+
+func require_Len(t testing.TB, a, b int) {
+	t.Helper()
+	if a != b {
+		antithesis.AssertUnreachable(t, "Failed require_Len check", nil)
 		t.Fatalf("require len, but got: %v != %v", a, b)
+	}
+}
+
+func require_LessThan[T cmp.Ordered](t *testing.T, a, b T) {
+	t.Helper()
+	if a >= b {
+		antithesis.AssertUnreachable(t, "Failed require_LessThan check", nil)
+		t.Fatalf("require %v to be less than %v", a, b)
+	}
+}
+
+func require_ChanRead[T any](t *testing.T, ch chan T, timeout time.Duration) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(timeout):
+		antithesis.AssertUnreachable(t, "Failed require_ChanRead check", nil)
+		t.Fatalf("require read from channel within %v but didn't get anything", timeout)
+	}
+	panic("this shouldn't be possible")
+}
+
+func require_NoChanRead[T any](t *testing.T, ch chan T, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-ch:
+		antithesis.AssertUnreachable(t, "Failed require_NoChanRead check", nil)
+		t.Fatalf("require no read from channel within %v but got something", timeout)
+	case <-time.After(timeout):
 	}
 }
 
@@ -269,9 +328,15 @@ func (c *cluster) shutdown() {
 	if c == nil {
 		return
 	}
+	// Stop any proxies.
+	for _, np := range c.nproxies {
+		np.stop()
+	}
+	// Shutdown and cleanup servers.
 	for i, s := range c.servers {
 		sd := s.StoreDir()
 		s.Shutdown()
+		s.WaitForShutdown()
 		if cf := c.opts[i].ConfigFile; cf != _EMPTY_ {
 			os.Remove(cf)
 		}

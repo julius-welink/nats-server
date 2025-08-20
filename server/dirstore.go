@@ -1,4 +1,4 @@
-// Copyright 2012-2021 The NATS Authors
+// Copyright 2012-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -103,7 +103,7 @@ func newDir(dirPath string, create bool) (string, error) {
 }
 
 // future proofing in case new options will be added
-type dirJWTStoreOption interface{}
+type dirJWTStoreOption any
 
 // Creates a directory based jwt store.
 // Reads files only, does NOT watch directories and files.
@@ -288,6 +288,10 @@ func (store *DirJWTStore) PackWalk(maxJWTs int, cb func(partialPackMsg string)) 
 			if err != nil {
 				return err
 			}
+			if len(jwtBytes) == 0 {
+				// Skip if no contents in the JWT.
+				return nil
+			}
 			if exp != nil {
 				claim, err := jwt.DecodeGeneric(string(jwtBytes))
 				if err == nil && claim.Expires > 0 && claim.Expires < time.Now().Unix() {
@@ -406,6 +410,9 @@ func (store *DirJWTStore) load(publicKey string) (string, error) {
 // write that keeps hash of all jwt in sync
 // Assumes the lock is held. Does return true or an error never both.
 func (store *DirJWTStore) write(path string, publicKey string, theJWT string) (bool, error) {
+	if len(theJWT) == 0 {
+		return false, fmt.Errorf("invalid JWT")
+	}
 	var newHash *[sha256.Size]byte
 	if store.expiration != nil {
 		h := sha256.Sum256([]byte(theJWT))
@@ -591,7 +598,7 @@ func (q *expirationTracker) Swap(i, j int) {
 	pq[j].index = j
 }
 
-func (q *expirationTracker) Push(x interface{}) {
+func (q *expirationTracker) Push(x any) {
 	n := len(q.heap)
 	item := x.(*jwtItem)
 	item.index = n
@@ -599,7 +606,7 @@ func (q *expirationTracker) Push(x interface{}) {
 	q.idx[item.publicKey] = q.lru.PushBack(item)
 }
 
-func (q *expirationTracker) Pop() interface{} {
+func (q *expirationTracker) Pop() any {
 	old := q.heap
 	n := len(old)
 	item := old[n-1]

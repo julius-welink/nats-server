@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -37,7 +37,6 @@ func TestAccountCycleService(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cycle service import, got none")
@@ -55,7 +54,6 @@ func TestAccountCycleService(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cycle service import, got none")
@@ -77,7 +75,6 @@ func TestAccountCycleService(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cycle service import, got none")
@@ -97,7 +94,6 @@ func TestAccountCycleStream(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cyclic import, got none")
 	}
@@ -116,7 +112,6 @@ func TestAccountCycleStreamWithMapping(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cyclic import, got none")
 	}
@@ -139,7 +134,6 @@ func TestAccountCycleNonCycleStreamWithMapping(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 	if _, err := server.ProcessConfigFile(conf); err != nil {
 		t.Fatalf("Expected no error but got %s", err)
 	}
@@ -158,7 +152,6 @@ func TestAccountCycleServiceCycleWithMapping(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
 		t.Fatalf("Expected an error on cycle service import, got none")
 	}
@@ -181,7 +174,6 @@ func TestAccountCycleServiceNonCycle(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	if _, err := server.ProcessConfigFile(conf); err != nil {
 		t.Fatalf("Expected no error but got %s", err)
@@ -208,7 +200,6 @@ func TestAccountCycleServiceNonCycleChain(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	if _, err := server.ProcessConfigFile(conf); err != nil {
 		t.Fatalf("Expected no error but got %s", err)
@@ -231,7 +222,6 @@ func TestServiceImportReplyMatchCycle(t *testing.T) {
 		}
 		no_auth_user: d
 	`))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -240,9 +230,19 @@ func TestServiceImportReplyMatchCycle(t *testing.T) {
 	defer nc1.Close()
 
 	msg := []byte("HELLO")
-	nc1.Subscribe("foo", func(m *nats.Msg) {
+	_, err := nc1.Subscribe("foo", func(m *nats.Msg) {
 		m.Respond(msg)
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure the subscription is known by the server we're connected to.
+	err = nc1.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkSubInterest(t, s, "B", "foo", time.Second)
 
 	nc2 := clientConnectToServer(t, s)
 	defer nc2.Close()
@@ -275,7 +275,6 @@ func TestServiceImportReplyMatchCycleMultiHops(t *testing.T) {
 		}
 		no_auth_user: d
 	`))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -284,9 +283,19 @@ func TestServiceImportReplyMatchCycleMultiHops(t *testing.T) {
 	defer nc1.Close()
 
 	msg := []byte("HELLO")
-	nc1.Subscribe("foo", func(m *nats.Msg) {
+	_, err := nc1.Subscribe("foo", func(m *nats.Msg) {
 		m.Respond(msg)
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure the subscription is known by the server we're connected to.
+	err = nc1.Flush()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkSubInterest(t, s, "B", "foo", time.Second)
 
 	nc2 := clientConnectToServer(t, s)
 	defer nc2.Close()
@@ -360,7 +369,6 @@ func TestAccountSubjectMapping(t *testing.T) {
     		"foo.*.*" : "foo.$1.{{wildcard(2)}}.{{partition(10,1,2)}}"
 		}
 	`))
-	defer removeFile(t, conf)
 
 	s, _ := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -379,6 +387,7 @@ func TestAccountSubjectMapping(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	sub1.AutoUnsubscribe(numMessages * 2)
+	nc1.Flush()
 
 	nc2 := clientConnectToServer(t, s)
 	defer nc2.Close()
@@ -397,7 +406,12 @@ func TestAccountSubjectMapping(t *testing.T) {
 	partitionsReceived := make([]int, numMessages)
 
 	for i := 0; i < numMessages; i++ {
-		subject := <-subjectsReceived
+		var subject string
+		select {
+		case subject = <-subjectsReceived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timed out waiting for messages")
+		}
 		sTokens := strings.Split(subject, ".")
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -427,23 +441,22 @@ func TestAccountSubjectMapping(t *testing.T) {
 	}
 }
 
-// test token and partition subject mapping within an account
+// test token subject mapping within an account
 // Alice imports from Bob with subject mapping
 func TestAccountImportSubjectMapping(t *testing.T) {
 	conf := createConfFile(t, []byte(`
-		port: -1
-		accounts {
-		  A {
-			users: [{user: a,  pass: x}]
-			imports [ {stream: {account: B, subject: "foo.*.*"}, to : "foo.$1.{{wildcard(2)}}.{{partition(10,1,2)}}"}]
-		  }
-		  B {
-			users: [{user: b, pass x}]
-		    exports [ { stream: ">" } ]
-		  }
-		}
+                port: -1
+                accounts {
+                  A {
+                      users: [{user: a,  pass: x}]
+                      imports [ {stream: {account: B, subject: "foo.*.*"}, to : "foo.$1.{{wildcard(2)}}"}]
+                  }
+                  B {
+                      users: [{user: b, pass x}]
+                      exports [ { stream: ">" } ]
+                  }
+                }
 	`))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 
@@ -455,58 +468,98 @@ func TestAccountImportSubjectMapping(t *testing.T) {
 	subjectsReceived := make(chan string)
 
 	msg := []byte("HELLO")
-	sub1, err := ncA.Subscribe("foo.*.*.*", func(m *nats.Msg) {
+	sub1, err := ncA.Subscribe("foo.*.*", func(m *nats.Msg) {
 		subjectsReceived <- m.Subject
 	})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	sub1.AutoUnsubscribe(numMessages * 2)
+	sub1.AutoUnsubscribe(numMessages)
+	ncA.Flush()
 
 	ncB := clientConnectToServerWithUP(t, opts, "b", "x")
 	defer ncB.Close()
 
-	// publish numMessages with an increasing id (should map to partition numbers with the range of 10 partitions) - twice
-	for j := 0; j < 2; j++ {
-		for i := 0; i < numMessages; i++ {
-			err = ncB.Publish(fmt.Sprintf("foo.%d.%d", i, numMessages-i), msg)
-			if err != nil {
-				t.Fatalf("Unexpected error: %v", err)
-			}
+	// publish numMessages with an increasing id
+
+	for i := 0; i < numMessages; i++ {
+		err = ncB.Publish(fmt.Sprintf("foo.%d.%d", i, numMessages-i), msg)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
 		}
 	}
 
-	// verify all the partition numbers are in the expected range
-	partitionsReceived := make([]int, numMessages)
-
 	for i := 0; i < numMessages; i++ {
-		subject := <-subjectsReceived
+		var subject string
+		select {
+		case subject = <-subjectsReceived:
+		case <-time.After(1 * time.Second):
+			t.Fatal("Timed out waiting for messages")
+		}
 		sTokens := strings.Split(subject, ".")
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
 		t1, _ := strconv.Atoi(sTokens[1])
 		t2, _ := strconv.Atoi(sTokens[2])
-		partitionsReceived[i], err = strconv.Atoi(sTokens[3])
-		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
-		}
 
-		if partitionsReceived[i] > 9 || partitionsReceived[i] < 0 || t1 != i || t2 != numMessages-i {
-			t.Fatalf("Error received unexpected %d.%d to partition %d", t1, t2, partitionsReceived[i])
+		if t1 != i || t2 != numMessages-i {
+			t.Fatalf("Error received unexpected %d.%d", t1, t2)
 		}
 	}
+}
 
-	// verify hashing is deterministic by checking it produces the same exact result twice
-	for i := 0; i < numMessages; i++ {
-		subject := <-subjectsReceived
-		partitionNumber, err := strconv.Atoi(strings.Split(subject, ".")[3])
-		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
+// bug: https://github.com/nats-io/nats-server/issues/1789
+func TestAccountCycleWithRenaming(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		accounts {
+		  A {
+		    exports [ { service: * } ]
+			imports [ { service { subject: foo, account: B }, to: foo } ]
+		  }
+		  B {
+		    exports [ { service: foo } ]
+			imports [ { service { subject: *, account: A }, to: "$1" } ]
+		  }
 		}
-		if partitionsReceived[i] != partitionNumber {
-			t.Fatalf("Error: same id mapped to two different partitions")
+	`))
+	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
+		t.Fatalf("Expected an error on cycle service import, got none")
+	}
+
+	conf = createConfFile(t, []byte(`
+		accounts {
+		  A {
+		    exports [ { stream: * } ]
+			imports [ { stream { subject: foo, account: B }, to: foo } ]
+		  }
+		  B {
+		    exports [ { stream: foo } ]
+			imports [ { stream { subject: *, account: A }, to: "$1" } ]
+		  }
 		}
+	`))
+	if _, err := server.ProcessConfigFile(conf); err == nil || !strings.Contains(err.Error(), server.ErrImportFormsCycle.Error()) {
+		t.Fatalf("Expected an error on cycle service import, got none")
+	}
+}
+
+// https://github.com/nats-io/nats-server/issues/5752
+func TestAccountCycleFalsePositiveSubjectMapping(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		accounts {
+		  A {
+		    exports [ { service: "a.*" } ]
+			imports [ { service { subject: "a.*", account: B }, to: "b.*" } ]
+		  }
+		  B {
+		    exports [ { service: "a.*" } ]
+			imports [ { service { subject: "a.foo", account: A }, to: "c.foo" } ]
+		  }
+		}
+	`))
+	if _, err := server.ProcessConfigFile(conf); err != nil {
+		t.Fatalf("Expected no errors on cycle service import, got error")
 	}
 }
 

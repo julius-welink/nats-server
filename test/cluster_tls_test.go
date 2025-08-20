@@ -1,4 +1,4 @@
-// Copyright 2013-2019 The NATS Authors
+// Copyright 2013-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -72,7 +72,7 @@ type captureTLSError struct {
 	ch chan struct{}
 }
 
-func (c *captureTLSError) Errorf(format string, v ...interface{}) {
+func (c *captureTLSError) Errorf(format string, v ...any) {
 	msg := fmt.Sprintf(format, v...)
 	if strings.Contains(msg, "handshake error") {
 		select {
@@ -87,7 +87,7 @@ type captureClusterTLSInsecureLogger struct {
 	ch chan struct{}
 }
 
-func (c *captureClusterTLSInsecureLogger) Warnf(format string, v ...interface{}) {
+func (c *captureClusterTLSInsecureLogger) Warnf(format string, v ...any) {
 	msg := fmt.Sprintf(format, v...)
 	if strings.Contains(msg, "solicited routes will not be verified") {
 		select {
@@ -103,6 +103,8 @@ func TestClusterTLSInsecure(t *testing.T) {
 		cluster {
 			name: "xyz"
 			listen: "127.0.0.1:-1"
+			pool_size: -1
+			compression: "disabled"
 			tls {
 			    cert_file: "./configs/certs/server-noip.pem"
 				key_file:  "./configs/certs/server-key-noip.pem"
@@ -122,6 +124,8 @@ func TestClusterTLSInsecure(t *testing.T) {
 		cluster {
 			name: "xyz"
 			listen: "127.0.0.1:-1"
+			pool_size: -1
+			compression: "disabled"
 			tls {
 			    cert_file: "./configs/certs/server-noip.pem"
 				key_file:  "./configs/certs/server-key-noip.pem"

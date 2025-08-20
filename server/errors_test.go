@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -20,7 +20,7 @@ import (
 
 func TestErrCtx(t *testing.T) {
 	ctx := "Extra context information"
-	e := NewErrorCtx(ErrWrongGateway, ctx)
+	e := NewErrorCtx(ErrWrongGateway, "%s", ctx)
 
 	if e.Error() != ErrWrongGateway.Error() {
 		t.Fatalf("%v and %v are supposed to be identical", e, ErrWrongGateway)
@@ -45,9 +45,9 @@ func TestErrCtx(t *testing.T) {
 
 func TestErrCtxWrapped(t *testing.T) {
 	ctxO := "Original Ctx"
-	eO := NewErrorCtx(ErrWrongGateway, ctxO)
+	eO := NewErrorCtx(ErrWrongGateway, "%s", ctxO)
 	ctx := "Extra context information"
-	e := NewErrorCtx(eO, ctx)
+	e := NewErrorCtx(eO, "%s", ctx)
 
 	if e.Error() != ErrWrongGateway.Error() {
 		t.Fatalf("%v and %v are supposed to be identical", e, ErrWrongGateway)

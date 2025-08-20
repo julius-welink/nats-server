@@ -1,4 +1,4 @@
-// Copyright 2018-2019 The NATS Authors
+// Copyright 2018-2024 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -45,7 +45,7 @@ func portFile(dirname string) string {
 }
 
 func TestPortsFile(t *testing.T) {
-	portFileDir := createDir(t, "")
+	portFileDir := t.TempDir()
 
 	opts := DefaultTestOptions
 	opts.PortsFileDir = portFileDir
@@ -122,9 +122,7 @@ func TestPortsFile(t *testing.T) {
 // makes a temp directory with two directories 'A' and 'B'
 // the location of the ports file is changed from dir A to dir B.
 func TestPortsFileReload(t *testing.T) {
-	// make a temp dir
-	tempDir := createDir(t, "")
-	defer removeDir(t, tempDir)
+	tempDir := t.TempDir()
 
 	// make child temp dir A
 	dirA := filepath.Join(tempDir, "A")

@@ -1,4 +1,4 @@
-// Copyright 2018-2019 The NATS Authors
+// Copyright 2018-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -341,6 +341,8 @@ func TestReloadDoesNotWipeAccountsWithOperatorMode(t *testing.T) {
 	cluster {
 		name: "A"
 		listen: 127.0.0.1:-1
+		pool_size: -1
+		compression: "disabled"
 		authorization {
 			timeout: 2.2
 		} %s
@@ -357,7 +359,6 @@ func TestReloadDoesNotWipeAccountsWithOperatorMode(t *testing.T) {
 	`
 	contents := strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
 	conf := createConfFile(t, []byte(contents))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -367,7 +368,6 @@ func TestReloadDoesNotWipeAccountsWithOperatorMode(t *testing.T) {
 	contents2 := strings.Replace(fmt.Sprintf(cf, routeStr, sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
 
 	conf2 := createConfFile(t, []byte(contents2))
-	defer removeFile(t, conf2)
 
 	s2, opts2 := RunServerWithConfig(conf2)
 	defer s2.Shutdown()
@@ -465,6 +465,7 @@ func TestReloadDoesUpdateAccountsWithMemoryResolver(t *testing.T) {
 	cluster {
 		name: "A"
 		listen: 127.0.0.1:-1
+		pool_size: -1
 		authorization {
 			timeout: 2.2
 		} %s
@@ -481,7 +482,6 @@ func TestReloadDoesUpdateAccountsWithMemoryResolver(t *testing.T) {
 	`
 	contents := strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
 	conf := createConfFile(t, []byte(contents))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -557,6 +557,7 @@ func TestReloadFailsWithBadAccountsWithMemoryResolver(t *testing.T) {
 	cluster {
 		name: "A"
 		listen: 127.0.0.1:-1
+		pool_size: -1
 		authorization {
 			timeout: 2.2
 		} %s
@@ -573,7 +574,6 @@ func TestReloadFailsWithBadAccountsWithMemoryResolver(t *testing.T) {
 	`
 	contents := strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, apub, ajwt), "\n\t", "\n", -1)
 	conf := createConfFile(t, []byte(contents))
-	defer removeFile(t, conf)
 
 	s, _ := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -637,7 +637,6 @@ func TestConnsRequestDoesNotLoadAccountCheckingConnLimits(t *testing.T) {
 	`
 	contents := strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
 	conf := createConfFile(t, []byte(contents))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -647,7 +646,6 @@ func TestConnsRequestDoesNotLoadAccountCheckingConnLimits(t *testing.T) {
 	contents2 := strings.Replace(fmt.Sprintf(cf, routeStr, sysPub, sysPub, sysJWT, accPub, accJWT), "\n\t", "\n", -1)
 
 	conf2 := createConfFile(t, []byte(contents2))
-	defer removeFile(t, conf2)
 
 	s2, _ := RunServerWithConfig(conf2)
 	defer s2.Shutdown()

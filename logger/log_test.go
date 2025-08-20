@@ -1,4 +1,4 @@
-// Copyright 2012-2018 The NATS Authors
+// Copyright 2012-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -24,8 +24,6 @@ import (
 	"strings"
 	"testing"
 )
-
-var tempRoot = filepath.Join(os.TempDir(), "nats-server")
 
 func TestStdLogger(t *testing.T) {
 	logger := NewStdLogger(false, false, false, false, false)
@@ -104,9 +102,7 @@ func TestStdLoggerTraceWithOutDebug(t *testing.T) {
 }
 
 func TestFileLogger(t *testing.T) {
-	tmpDir := createDir(t, "_nats-server")
-	defer removeDir(t, tmpDir)
-
+	tmpDir := t.TempDir()
 	file := createFileAtDir(t, tmpDir, "nats-server:log_")
 	file.Close()
 
@@ -129,7 +125,7 @@ func TestFileLogger(t *testing.T) {
 	file = createFileAtDir(t, tmpDir, "nats-server:log_")
 	file.Close()
 
-	logger = NewFileLogger(file.Name(), true, true, true, true)
+	logger = NewFileLogger(file.Name(), true, false, true, true)
 	defer logger.Close()
 	logger.Errorf("foo")
 
@@ -176,8 +172,7 @@ func TestFileLoggerSizeLimit(t *testing.T) {
 	}
 	logger.Close()
 
-	tmpDir := createDir(t, "nats-server")
-	defer removeDir(t, tmpDir)
+	tmpDir := t.TempDir()
 
 	file := createFileAtDir(t, tmpDir, "log_")
 	file.Close()
@@ -210,10 +205,7 @@ func TestFileLoggerSizeLimit(t *testing.T) {
 		t.Fatalf("Should be statement about rotated log and backup name, got %s", content)
 	}
 
-	// Remove all files
-	removeDir(t, tmpDir)
-	tmpDir = createDir(t, "nats-server")
-	defer removeDir(t, tmpDir)
+	tmpDir = t.TempDir()
 
 	// Recreate logger and don't set a limit
 	file = createFileAtDir(t, tmpDir, "log_")
@@ -325,18 +317,6 @@ func expectOutput(t *testing.T, f func(), expected string) {
 	}
 }
 
-func createDir(t *testing.T, prefix string) string {
-	t.Helper()
-	if err := os.MkdirAll(tempRoot, 0700); err != nil {
-		t.Fatal(err)
-	}
-	dir, err := os.MkdirTemp(tempRoot, prefix)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
 func createFileAtDir(t *testing.T, dir, prefix string) *os.File {
 	t.Helper()
 	f, err := os.CreateTemp(dir, prefix)
@@ -344,11 +324,4 @@ func createFileAtDir(t *testing.T, dir, prefix string) *os.File {
 		t.Fatal(err)
 	}
 	return f
-}
-
-func removeDir(t *testing.T, dir string) {
-	t.Helper()
-	if err := os.RemoveAll(dir); err != nil {
-		t.Fatal(err)
-	}
 }

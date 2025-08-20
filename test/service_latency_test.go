@@ -1,4 +1,4 @@
-// Copyright 2019-2021 The NATS Authors
+// Copyright 2019-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -674,8 +674,14 @@ func TestServiceLatencyWithNameMultiServer(t *testing.T) {
 	nc2.Request("ngs.usage", []byte("1h"), time.Second)
 
 	var sl server.ServiceLatency
-	rmsg, _ := rsub.NextMsg(time.Second)
-	json.Unmarshal(rmsg.Data, &sl)
+	checkFor(t, 3*time.Second, time.Second, func() error {
+		rmsg, err := rsub.NextMsg(500 * time.Millisecond)
+		if err != nil {
+			return err
+		}
+		json.Unmarshal(rmsg.Data, &sl)
+		return nil
+	})
 
 	// Make sure we have AppName set.
 	rs := sc.clusters[0].servers[1]
@@ -745,7 +751,6 @@ func TestServiceLatencyWithJWT(t *testing.T) {
 	`
 	contents := strings.Replace(fmt.Sprintf(cf, "", sysPub, sysPub, sysJWT, svcPub, svcJWT, accPub, accJWT), "\n\t", "\n", -1)
 	conf := createConfFile(t, []byte(contents))
-	defer removeFile(t, conf)
 
 	s, opts := RunServerWithConfig(conf)
 	defer s.Shutdown()
@@ -755,7 +760,6 @@ func TestServiceLatencyWithJWT(t *testing.T) {
 	contents2 := strings.Replace(fmt.Sprintf(cf, routeStr, sysPub, sysPub, sysJWT, svcPub, svcJWT, accPub, accJWT), "\n\t", "\n", -1)
 
 	conf2 := createConfFile(t, []byte(contents2))
-	defer removeFile(t, conf2)
 
 	s2, opts2 := RunServerWithConfig(conf2)
 	defer s2.Shutdown()
@@ -1179,7 +1183,6 @@ func TestServiceLatencyOldRequestStyleSingleServer(t *testing.T) {
 
 		system_account: SYS
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -1245,7 +1248,6 @@ func TestServiceAndStreamStackOverflow(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -1424,7 +1426,6 @@ func TestServiceLatencyRequestorSharesConfig(t *testing.T) {
 
 		system_account: SYS
 	`))
-	defer removeFile(t, conf)
 
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
@@ -1535,7 +1536,6 @@ func TestServiceLatencyLossTest(t *testing.T) {
 		}
 		system_account: SYS
 	`))
-	defer removeFile(t, conf)
 	srv, opts := RunServerWithConfig(conf)
 	defer srv.Shutdown()
 
@@ -1722,7 +1722,6 @@ func TestServiceLatencyHeaderTriggered(t *testing.T) {
 
 				system_account: SYS
 			`, v.shared)))
-			defer removeFile(t, conf)
 			srv, opts := RunServerWithConfig(conf)
 			defer srv.Shutdown()
 
@@ -1808,7 +1807,6 @@ func TestServiceLatencyMissingResults(t *testing.T) {
 		  }
 		}
 	`))
-	defer removeFile(t, accConf)
 
 	s1Conf := createConfFile(t, []byte(fmt.Sprintf(`
 		listen: 127.0.0.1:-1
@@ -1816,7 +1814,9 @@ func TestServiceLatencyMissingResults(t *testing.T) {
 		cluster { port: -1 }
 		include %q
 	`, filepath.Base(accConf))))
-	defer removeFile(t, s1Conf)
+
+	// Link accConf for relative import from s1Conf
+	os.Link(accConf, filepath.Join(filepath.Dir(s1Conf), filepath.Base(accConf)))
 
 	s1, opts1 := RunServerWithConfig(s1Conf)
 	defer s1.Shutdown()
@@ -1830,7 +1830,9 @@ func TestServiceLatencyMissingResults(t *testing.T) {
 		}
 		include %q
 	`, opts1.Cluster.Port, filepath.Base(accConf))))
-	defer removeFile(t, s2Conf)
+
+	// Link accConf for relative import from s2Conf
+	os.Link(accConf, filepath.Join(filepath.Dir(s2Conf), filepath.Base(accConf)))
 
 	s2, opts2 := RunServerWithConfig(s2Conf)
 	defer s2.Shutdown()

@@ -1,4 +1,4 @@
-// Copyright 2012-2018 The NATS Authors
+// Copyright 2012-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -12,7 +12,6 @@
 // limitations under the License.
 
 //go:build windows
-// +build windows
 
 package logger
 
@@ -108,7 +107,7 @@ func TestSysLoggerWithDebugAndTrace(t *testing.T) {
 	}
 }
 
-// TestSysLoggerWithDebugAndTrace tests remote event logging
+// TestRemoteSysLoggerWithDebugAndTrace tests remote event logging
 func TestRemoteSysLoggerWithDebugAndTrace(t *testing.T) {
 	checkPrivledges(t)
 	logger := NewRemoteSysLogger("", true, true)
