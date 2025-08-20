@@ -53,16 +53,7 @@ func (s *Server) handleSignals() {
 					s.WaitForShutdown()
 					os.Exit(0)
 				case syscall.SIGTERM:
-					// Shutdown unless graceful shutdown already in progress.
-					s.mu.Lock()
-					ldm := s.ldm
-					s.mu.Unlock()
-
-					if !ldm {
-						s.Shutdown()
-						s.WaitForShutdown()
-						os.Exit(0)
-					}
+					go s.lameDuckMode()
 				case syscall.SIGUSR1:
 					// File log re-open for rotating file logs.
 					s.ReOpenLogFile()

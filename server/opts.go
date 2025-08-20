@@ -383,6 +383,7 @@ type Options struct {
 	// INFO protocol first. It allows for a mix of newer clients that can
 	// require a TLS handshake first, and older clients that can't.
 	TLSHandshakeFirstFallback time.Duration `json:"-"`
+	TLSRateLimitWhitelist string            `json:"-"`
 	AllowNonTLS               bool          `json:"-"`
 	WriteDeadline             time.Duration `json:"-"`
 	MaxClosedClients          int           `json:"-"`
@@ -737,7 +738,7 @@ type TLSConfigOpts struct {
 	FallbackDelay        time.Duration // Where supported, indicates how long to wait for the handshake before falling back to sending the INFO protocol first.
 	Timeout              float64
 	RateLimit            int64
-	Ciphers              []uint16
+	RateLimitWhiteList stringCiphers              []uint16
 	CurvePreferences     []tls.CurveID
 	PinnedCerts          PinnedCertSet
 	CertStore            certstore.StoreType
@@ -1228,6 +1229,7 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		o.TLSMap = tc.Map
 		o.TLSPinnedCerts = tc.PinnedCerts
 		o.TLSRateLimit = tc.RateLimit
+		o.TLSRateLimitWhitelist = tc.RateLimitWhiteList
 		o.TLSHandshakeFirst = tc.HandshakeFirst
 		o.TLSHandshakeFirstFallback = tc.FallbackDelay
 
@@ -4793,6 +4795,15 @@ func parseTLS(v any, isClientCtx bool) (t *TLSConfigOpts, retErr error) {
 				return nil, &configErr{tk, "error parsing tls config, 'connection_rate_limit' wrong type"}
 			}
 			tc.RateLimit = at
+		case "connection_rate_whitelist":
+			at := ""
+			switch mv := mv.(type) {
+			case string:
+				at = mv
+			default:
+				return nil, &configErr{tk, "error parsing tls config, 'connection_rate_whitelist' wrong type"}
+			}
+			tc.RateLimitWhiteList = at
 		case "pinned_certs":
 			ra, ok := mv.([]any)
 			if !ok {
