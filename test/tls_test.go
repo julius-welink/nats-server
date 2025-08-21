@@ -2057,3 +2057,10 @@ func TestAllowNonTLSReload(t *testing.T) {
 	}
 	check()
 }
+
+func removeFile(t *testing.T, file string) {
+	t.Helper()
+	if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("Error removing file %q: %v", file, err)
+	}
+}
