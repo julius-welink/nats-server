@@ -18,7 +18,14 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/bits"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -988,6 +995,90 @@ func BenchmarkJetStreamPublish(b *testing.B) {
 				}
 			},
 		)
+	}
+}
+
+func BenchmarkJetStreamMetaSnapshot(b *testing.B) {
+	c := createJetStreamClusterExplicit(b, "R3S", 3)
+	defer c.shutdown()
+
+	setup := func(reqLevel string) *jetStream {
+		ml := c.leader()
+		acc, js := ml.globalAccount(), ml.getJetStream()
+		n := js.getMetaGroup()
+
+		// Create all streams and consumers.
+		numStreams := 200
+		numConsumers := 500
+		ci := &ClientInfo{Cluster: "R3S", Account: globalAccountName}
+		js.mu.Lock()
+		metadata := map[string]string{JSRequiredLevelMetadataKey: reqLevel}
+		for i := 0; i < numStreams; i++ {
+			scfg := &StreamConfig{
+				Name:     fmt.Sprintf("STREAM-%d", i),
+				Subjects: []string{fmt.Sprintf("SUBJECT-%d", i)},
+				Storage:  MemoryStorage,
+				Metadata: metadata,
+			}
+			cfg, _ := ml.checkStreamCfg(scfg, acc, false)
+			rg, _ := js.createGroupForStream(ci, &cfg)
+			sa := &streamAssignment{Group: rg, Sync: syncSubjForStream(), Config: &cfg, Client: ci, Created: time.Now().UTC()}
+			n.Propose(encodeAddStreamAssignment(sa))
+
+			for j := 0; j < numConsumers; j++ {
+				ccfg := &ConsumerConfig{
+					Durable:       fmt.Sprintf("CONSUMER-%d", j),
+					MemoryStorage: true,
+					Metadata:      metadata,
+				}
+				selectedLimits, _, _, _ := acc.selectLimits(ccfg.replicas(&cfg))
+				srvLim := &ml.getOpts().JetStreamLimits
+				setConsumerConfigDefaults(ccfg, &cfg, srvLim, selectedLimits, false)
+				rg = js.cluster.createGroupForConsumer(ccfg, sa)
+				ca := &consumerAssignment{Group: rg, Stream: cfg.Name, Name: ccfg.Durable, Config: ccfg, Client: ci, Created: time.Now().UTC()}
+				n.Propose(encodeAddConsumerAssignment(ca))
+			}
+		}
+		js.mu.Unlock()
+
+		// Wait for all servers to have created all assets.
+		checkFor(b, 20*time.Second, 200*time.Millisecond, func() error {
+			for _, s := range c.servers {
+				sjs := s.getJetStream()
+				sjs.mu.RLock()
+				streams := sjs.cluster.streams[globalAccountName]
+				if len(streams) != numStreams {
+					sjs.mu.RUnlock()
+					return fmt.Errorf("expected %d streams, got %d", numStreams, len(streams))
+				}
+				for _, sa := range streams {
+					if nc := len(sa.consumers); nc != numConsumers {
+						sjs.mu.RUnlock()
+						return fmt.Errorf("expected %d consumers, got %d", numConsumers, nc)
+					}
+				}
+				sjs.mu.RUnlock()
+			}
+			return nil
+		})
+		return js
+	}
+
+	for _, t := range []struct {
+		title    string
+		reqLevel string
+	}{
+		{title: "Default", reqLevel: "0"},
+		{title: "AllUnsupported", reqLevel: strconv.Itoa(math.MaxInt)},
+	} {
+		b.Run(t.title, func(b *testing.B) {
+			js := setup(t.reqLevel)
+			b.ResetTimer()
+			for range b.N {
+				js.metaSnapshot()
+			}
+			b.StopTimer()
+		})
 	}
 }
 
@@ -2096,6 +2187,121 @@ func BenchmarkJetStreamPublishConcurrent(b *testing.B) {
 				}
 			})
 	}
+}
+
+func BenchmarkJetStreamParallelStartup(b *testing.B) {
+	omp := runtime.GOMAXPROCS(-1)
+	streams, msgs, cardinality := omp, 100_000, 10_000
+
+	_, s, shutdown, nc, js := startJSClusterAndConnect(b, 1)
+	defer shutdown()
+	jsc := *s.JetStreamConfig()
+	sd := strings.TrimSuffix(jsc.StoreDir, "/jetstream")
+
+	b.Logf("Building %d streams with %d messages, %d subjects...", streams, msgs, cardinality)
+	start := time.Now()
+	for i := range streams {
+		jsStreamCreate(b, nc, &StreamConfig{
+			Name:     fmt.Sprintf("stream_%d", i),
+			Subjects: []string{fmt.Sprintf("%d.>", i)},
+			Storage:  FileStorage,
+		})
+		for n := range msgs {
+			subj := fmt.Sprintf("%d.%d", i, n%cardinality)
+			_, err := js.Publish(subj, nil)
+			require_NoError(b, err)
+		}
+	}
+	b.Logf("Streams built in %s", time.Since(start))
+
+	bench := func(b *testing.B) {
+		s.shutdownJetStream()
+		jsc.StoreDir = sd
+		require_NoError(b, filepath.Walk(jsc.StoreDir, func(path string, info os.FileInfo, err error) error {
+			require_NoError(b, err)
+			if info.Mode().IsRegular() && info.Name() == "index.db" {
+				return os.Truncate(path, 0)
+			}
+			return nil
+		}))
+		b.ResetTimer()
+		s.EnableJetStream(&jsc)
+	}
+
+	// Try to step down GOMAXPROCS in common CPU core counts.
+	mp := 1 << (bits.Len(uint(omp)) - 1)
+	if omp > mp {
+		b.Run(fmt.Sprintf("GOMAXPROCS=%d", omp), func(b *testing.B) {
+			bench(b)
+		})
+	}
+	for ; mp >= 1; mp >>= 1 {
+		b.Run(fmt.Sprintf("GOMAXPROCS=%d", mp), func(b *testing.B) {
+			runtime.GOMAXPROCS(mp)
+			defer runtime.GOMAXPROCS(omp)
+			bench(b)
+		})
+	}
+}
+
+func BenchmarkJetStreamScanForSources(b *testing.B) {
+	_, s, shutdown, nc, js := startJSClusterAndConnect(b, 1)
+	defer shutdown()
+
+	jsStreamCreate(b, nc, &StreamConfig{
+		Name:     "origin",
+		Subjects: []string{"foo"},
+		Storage:  FileStorage,
+	})
+
+	jsStreamCreate(b, nc, &StreamConfig{
+		Name:     "stream",
+		Subjects: []string{"bar"},
+		Storage:  FileStorage,
+		Sources: []*StreamSource{
+			{
+				Name:          "origin",
+				FilterSubject: "foo",
+			},
+		},
+	})
+
+	// Start by publishing some messages to the sourcing stream.
+	for range 1000 {
+		_, err := js.Publish("bar", nil)
+		require_NoError(b, err)
+	}
+
+	// Then publish a message to the origin stream.
+	_, err := js.Publish("foo", nil)
+	require_NoError(b, err)
+
+	// Wait for the sourced message from the origin stream.
+	checkFor(b, 5*time.Second, 100*time.Millisecond, func() error {
+		si, err := js.StreamInfo("stream")
+		if err != nil {
+			return err
+		}
+		if si.State.Msgs != 1001 {
+			return fmt.Errorf("waiting for sourcing")
+		}
+		return nil
+	})
+
+	// Now publish a LOT more messages to the sourcing stream
+	// which previously the reverse scan would have had to scan
+	// over linearly.
+	for range 100_000 {
+		_, err := js.Publish("bar", nil)
+		require_NoError(b, err)
+	}
+
+	mset, err := s.globalAccount().lookupStream("stream")
+	require_NoError(b, err)
+
+	b.Run("StartingSequenceForSources", func(b *testing.B) {
+		mset.startingSequenceForSources()
+	})
 }
 
 // Helper function to stand up a JS-enabled single server or cluster

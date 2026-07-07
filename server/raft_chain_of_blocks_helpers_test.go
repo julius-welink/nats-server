@@ -126,6 +126,8 @@ func (sm *RCOBStateMachine) applyEntry(ce *CommittedEntry) {
 			sm.applyBlock(entry.Data)
 		} else if entry.Type == EntrySnapshot {
 			sm.loadSnapshot(entry.Data)
+		} else if entry.Type == EntryCatchup {
+			// Ignore.
 		} else {
 			panic(fmt.Sprintf("[%s] unknown entry type: %s", sm.s.Name(), entry.Type))
 		}
@@ -315,7 +317,7 @@ func (sm *RCOBStateMachine) createSnapshot() {
 	}
 
 	// InstallSnapshot is actually "save the snapshot", which is an operation delegated to the node
-	err = sm.n.InstallSnapshot(snapshotData)
+	err = sm.n.InstallSnapshot(snapshotData, false)
 	if err != nil {
 		sm.logDebug("failed to snapshot: %s", err)
 		return

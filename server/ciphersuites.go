@@ -39,22 +39,3 @@ func defaultCipherSuites() []uint16 {
 	}
 	return defaults
 }
-
-// Where we maintain available curve preferences
-var curvePreferenceMap = map[string]tls.CurveID{
-	"X25519":    tls.X25519,
-	"CurveP256": tls.CurveP256,
-	"CurveP384": tls.CurveP384,
-	"CurveP521": tls.CurveP521,
-}
-
-// reorder to default to the highest level of security.  See:
-// https://blog.bracebin.com/achieving-perfect-ssl-labs-score-with-go
-func defaultCurvePreferences() []tls.CurveID {
-	return []tls.CurveID{
-		tls.X25519, // faster than P256, arguably more secure
-		tls.CurveP256,
-		tls.CurveP384,
-		tls.CurveP521,
-	}
-}

@@ -21,7 +21,6 @@ import (
 	"os"
 
 	"github.com/nats-io/nats-server/v2/server"
-	"go.uber.org/automaxprocs/maxprocs"
 )
 
 var usageStr = `
@@ -114,6 +113,9 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Redact secret arguments before expvar reads them.
+	server.RedactArgs(os.Args)
+
 	// Create the server with appropriate options.
 	s, err := server.NewServer(opts)
 	if err != nil {
@@ -126,14 +128,6 @@ func main() {
 	// Start things up. Block here until done.
 	if err := server.Run(s); err != nil {
 		server.PrintAndDie(err.Error())
-	}
-
-	// Adjust MAXPROCS if running under linux/cgroups quotas.
-	undo, err := maxprocs.Set(maxprocs.Logger(s.Debugf))
-	if err != nil {
-		s.Warnf("Failed to set GOMAXPROCS: %v", err)
-	} else {
-		defer undo()
 	}
 
 	s.WaitForShutdown()

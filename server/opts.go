@@ -15,6 +15,7 @@ package server
 
 import (
 	"context"
+	"crypto/fips140"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -61,28 +63,30 @@ type PinnedCertSet map[string]struct{}
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
 type ClusterOpts struct {
-	Name              string            `json:"-"`
-	Host              string            `json:"addr,omitempty"`
-	Port              int               `json:"cluster_port,omitempty"`
-	Username          string            `json:"-"`
-	Password          string            `json:"-"`
-	AuthTimeout       float64           `json:"auth_timeout,omitempty"`
-	Permissions       *RoutePermissions `json:"-"`
-	TLSTimeout        float64           `json:"-"`
-	TLSConfig         *tls.Config       `json:"-"`
-	TLSMap            bool              `json:"-"`
-	TLSCheckKnownURLs bool              `json:"-"`
-	TLSPinnedCerts    PinnedCertSet     `json:"-"`
-	ListenStr         string            `json:"-"`
-	Advertise         string            `json:"-"`
-	NoAdvertise       bool              `json:"-"`
-	ConnectRetries    int               `json:"-"`
-	ConnectBackoff    bool              `json:"-"`
-	PoolSize          int               `json:"-"`
-	PinnedAccounts    []string          `json:"-"`
-	Compression       CompressionOpts   `json:"-"`
-	PingInterval      time.Duration     `json:"-"`
-	MaxPingsOut       int               `json:"-"`
+	Name              string             `json:"-"`
+	Host              string             `json:"addr,omitempty"`
+	Port              int                `json:"cluster_port,omitempty"`
+	Username          string             `json:"-"`
+	Password          string             `json:"-"`
+	AuthTimeout       float64            `json:"auth_timeout,omitempty"`
+	Permissions       *RoutePermissions  `json:"-"`
+	TLSTimeout        float64            `json:"-"`
+	TLSConfig         *tls.Config        `json:"-"`
+	TLSMap            bool               `json:"-"`
+	TLSCheckKnownURLs bool               `json:"-"`
+	TLSPinnedCerts    PinnedCertSet      `json:"-"`
+	ListenStr         string             `json:"-"`
+	Advertise         string             `json:"-"`
+	NoAdvertise       bool               `json:"-"`
+	ConnectRetries    int                `json:"-"`
+	ConnectBackoff    bool               `json:"-"`
+	PoolSize          int                `json:"-"`
+	PinnedAccounts    []string           `json:"-"`
+	Compression       CompressionOpts    `json:"-"`
+	PingInterval      time.Duration      `json:"-"`
+	MaxPingsOut       int                `json:"-"`
+	WriteDeadline     time.Duration      `json:"-"`
+	WriteTimeout      WriteTimeoutPolicy `json:"-"`
 
 	// Not exported (used in tests)
 	resolver netResolver
@@ -105,6 +109,34 @@ type CompressionOpts struct {
 	RTTThresholds []time.Duration
 }
 
+func (c1 *CompressionOpts) equals(c2 *CompressionOpts) bool {
+	if c1 == c2 {
+		return true
+	}
+	if (c1 == nil && c2 != nil) || (c1 != nil && c2 == nil) {
+		return false
+	}
+	if c1.Mode != c2.Mode {
+		return false
+	}
+	// For s2_auto, if one has an empty RTTThresholds, it is equivalent
+	// to the defaultCompressionS2AutoRTTThresholds array, so compare with that.
+	if c1.Mode == CompressionS2Auto {
+		rtts1 := c1.RTTThresholds
+		if len(rtts1) == 0 {
+			rtts1 = defaultCompressionS2AutoRTTThresholds
+		}
+		rtts2 := c2.RTTThresholds
+		if len(rtts2) == 0 {
+			rtts2 = defaultCompressionS2AutoRTTThresholds
+		}
+		if !reflect.DeepEqual(rtts1, rtts2) {
+			return false
+		}
+	}
+	return true
+}
+
 // GatewayOpts are options for gateways.
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
@@ -125,6 +157,8 @@ type GatewayOpts struct {
 	ConnectBackoff    bool                 `json:"connect_backoff,omitempty"`
 	Gateways          []*RemoteGatewayOpts `json:"gateways,omitempty"`
 	RejectUnknown     bool                 `json:"reject_unknown,omitempty"` // config got renamed to reject_unknown_cluster
+	WriteDeadline     time.Duration        `json:"-"`
+	WriteTimeout      WriteTimeoutPolicy   `json:"-"`
 
 	// Not exported, for tests.
 	resolver         netResolver
@@ -171,10 +205,12 @@ type LeafNodeOpts struct {
 	// to start before falling back to previous behavior of sending the
 	// INFO protocol first. It allows for a mix of newer remote leafnodes
 	// that can require a TLS handshake first, and older that can't.
-	TLSHandshakeFirstFallback time.Duration `json:"-"`
-	Advertise                 string        `json:"-"`
-	NoAdvertise               bool          `json:"-"`
-	ReconnectInterval         time.Duration `json:"-"`
+	TLSHandshakeFirstFallback time.Duration      `json:"-"`
+	Advertise                 string             `json:"-"`
+	NoAdvertise               bool               `json:"-"`
+	ReconnectInterval         time.Duration      `json:"-"`
+	WriteDeadline             time.Duration      `json:"-"`
+	WriteTimeout              WriteTimeoutPolicy `json:"-"`
 
 	// Compression options
 	Compression CompressionOpts `json:"-"`
@@ -188,6 +224,10 @@ type LeafNodeOpts struct {
 	// (since empty version string in CONNECT would fail the "version at
 	// least" test).
 	MinVersion string
+
+	// Isolate subject interest from other leafnode connections, preventing
+	// east-west propagation.
+	IsolateLeafnodeInterest bool `json:"-"`
 
 	// Not exported, for tests.
 	resolver    netResolver
@@ -237,6 +277,18 @@ type RemoteLeafOpts struct {
 		NoMasking   bool `json:"-"`
 	}
 
+	// HTTP Proxy configuration for WebSocket connections
+	Proxy struct {
+		// URL of the HTTP proxy server (e.g., "http://proxy.example.com:8080")
+		URL string `json:"-"`
+		// Username for proxy authentication
+		Username string `json:"-"`
+		// Password for proxy authentication
+		Password string `json:"-"`
+		// Timeout for proxy connection
+		Timeout time.Duration `json:"-"`
+	}
+
 	tlsConfigOpts *TLSConfigOpts
 
 	// If we are clustered and our local account has JetStream, if apps are accessing
@@ -249,11 +301,59 @@ type RemoteLeafOpts struct {
 	// will be migrated away from this server if still disconnected.
 	JetStreamClusterMigrateDelay time.Duration `json:"jetstream_cluster_migrate_delay,omitempty"`
 
+	// LocalIsolation isolates this remote from east-west subject interest originating locally.
+	LocalIsolation bool `json:"local_isolation,omitempty"`
+
+	// RequestIsolation asks the remote side to isolate us from their east-west subject interest.
+	RequestIsolation bool `json:"request_isolation,omitempty"`
+
 	// If this is set to true, the connection to this remote will not be solicited.
 	// During a configuration reload, if this is changed from `false` to `true`, the
 	// existing connection will be closed and not solicited again (until it is changed
 	// to `false` again.
 	Disabled bool `json:"-"`
+
+	// If this is set to true, this remote will ignore any server leafnode URLs
+	// returned by the hub, allowing the user to fully manage the servers this
+	// remote can connect to.
+	IgnoreDiscoveredServers bool `json:"-"`
+}
+
+// Returns a string representation of this `RemoteLeafOpts` object, containing
+// the URLs (unredacted), the account (or "$G" if none is specified) and, if present,
+// the credentials filename.
+func (r *RemoteLeafOpts) name() string {
+	return generateRemoteLeafOptsName(r, false)
+}
+
+// Same than RemoteLeafOpts.name() but uses redacted URLs. This is to be used for logging.
+func (r *RemoteLeafOpts) safeName() string {
+	return generateRemoteLeafOptsName(r, true)
+}
+
+func generateRemoteLeafOptsName(r *RemoteLeafOpts, redacted bool) string {
+	acc := r.LocalAccount
+	if acc == _EMPTY_ {
+		acc = globalAccountName
+	}
+	var optional string
+	// There could be Credentials or NKey, not both (would be caught as a misconfig)
+	if c := r.Credentials; c != _EMPTY_ {
+		optional = fmt.Sprintf(", credentials=%q", c)
+	} else if nk := r.Nkey; nk != _EMPTY_ {
+		if redacted {
+			optional = ", nkey=\"[REDACTED]\""
+		} else {
+			optional = fmt.Sprintf(", nkey=%q", nk)
+		}
+	}
+	var urls []*url.URL
+	if redacted {
+		urls = redactURLList(r.URLs)
+	} else {
+		urls = r.URLs
+	}
+	return fmt.Sprintf("urls=%q, account=%q%s", urls, acc, optional)
 }
 
 // JSLimitOpts are active limits for the meta cluster
@@ -304,7 +404,8 @@ type Options struct {
 	Trace           bool   `json:"-"`
 	Debug           bool   `json:"-"`
 	TraceVerbose    bool   `json:"-"`
-	// TraceHeaders if true will only trace message headers, not the payload
+
+	// TraceHeaders if true will only trace message headers, not the payload.
 	TraceHeaders               bool          `json:"-"`
 	NoLog                      bool          `json:"-"`
 	NoSigs                     bool          `json:"-"`
@@ -326,6 +427,7 @@ type Options struct {
 	Username                   string        `json:"-"`
 	Password                   string        `json:"-"`
 	ProxyRequired              bool          `json:"-"`
+	ProxyProtocol              bool          `json:"-"`
 	Authorization              string        `json:"-"`
 	AuthCallout                *AuthCallout  `json:"-"`
 	PingInterval               time.Duration `json:"ping_interval"`
@@ -356,6 +458,11 @@ type Options struct {
 	JetStreamTpm               JSTpmOpts
 	JetStreamMaxCatchup        int64
 	JetStreamRequestQueueLimit int64
+	JetStreamInfoQueueLimit    int64
+	JetStreamMetaCompact       uint64
+	JetStreamMetaCompactSize   uint64
+	JetStreamMetaCompactSync   bool
+	JetStreamConcurrentIOs     int
 	StreamMaxBufferedMsgs      int               `json:"-"`
 	StreamMaxBufferedSize      int64             `json:"-"`
 	StoreDir                   string            `json:"-"`
@@ -396,12 +503,13 @@ type Options struct {
 	// to start before falling back to previous behavior of sending the
 	// INFO protocol first. It allows for a mix of newer clients that can
 	// require a TLS handshake first, and older clients that can't.
-	TLSHandshakeFirstFallback time.Duration `json:"-"`
-	AllowNonTLS               bool          `json:"-"`
-	WriteDeadline             time.Duration `json:"-"`
-	MaxClosedClients          int           `json:"-"`
-	LameDuckDuration          time.Duration `json:"-"`
-	LameDuckGracePeriod       time.Duration `json:"-"`
+	TLSHandshakeFirstFallback time.Duration      `json:"-"`
+	AllowNonTLS               bool               `json:"-"`
+	WriteDeadline             time.Duration      `json:"-"`
+	WriteTimeout              WriteTimeoutPolicy `json:"-"`
+	MaxClosedClients          int                `json:"-"`
+	LameDuckDuration          time.Duration      `json:"-"`
+	LameDuckGracePeriod       time.Duration      `json:"-"`
 
 	// MaxTracedMsgLen is the maximum printable length for traced messages.
 	MaxTracedMsgLen int `json:"-"`
@@ -442,6 +550,9 @@ type Options struct {
 
 	// Metadata describing the server. They will be included in 'Z' responses.
 	Metadata map[string]string `json:"-"`
+
+	// FeatureFlags the server opts-in to (or opts-out of). They will be included in 'Z' responses.
+	FeatureFlags map[string]bool `json:"-"`
 
 	// OCSPConfig enables OCSP Stapling in the server.
 	OCSPConfig    *OCSPConfig
@@ -560,6 +671,11 @@ type WebsocketOpts struct {
 	// and write the response back to the client. This include the
 	// time needed for the TLS Handshake.
 	HandshakeTimeout time.Duration
+
+	// How often to send pings to WebSocket clients. When set to a non-zero
+	// duration, this overrides the default PingInterval for WebSocket connections.
+	// If not set or zero, the server's default PingInterval will be used.
+	PingInterval time.Duration
 
 	// Headers to be added to the upgrade response.
 	// Useful for adding custom headers like Strict-Transport-Security.
@@ -1226,8 +1342,12 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		o.MaxPayload = int32(v.(int64))
 	case "max_pending":
 		o.MaxPending = v.(int64)
+	case "proxy_protocol":
+		o.ProxyProtocol = v.(bool)
 	case "max_connections", "max_conn":
-		o.MaxConn = int(v.(int64))
+		if o.MaxConn = int(v.(int64)); o.MaxConn == 0 {
+			o.MaxConn = -1
+		}
 	case "max_traced_msg_len":
 		o.MaxTracedMsgLen = int(v.(int64))
 	case "max_subscriptions", "max_subs":
@@ -1320,6 +1440,8 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 		o.AllowNonTLS = v.(bool)
 	case "write_deadline":
 		o.WriteDeadline = parseDuration("write_deadline", tk, v, errors, warnings)
+	case "write_timeout":
+		o.WriteTimeout = parseWriteDeadlinePolicy(tk, v.(string), errors)
 	case "lame_duck_duration":
 		dur, err := time.ParseDuration(v.(string))
 		if err != nil {
@@ -1647,7 +1769,7 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 	case "reconnect_error_reports":
 		o.ReconnectErrorReports = int(v.(int64))
 	case "websocket", "ws":
-		if err := parseWebsocket(tk, o, errors); err != nil {
+		if err := parseWebsocket(tk, o, errors, warnings); err != nil {
 			*errors = append(*errors, err)
 			return
 		}
@@ -1697,6 +1819,29 @@ func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnin
 			}
 		default:
 			err = &configErr{tk, fmt.Sprintf("error parsing metadata: unsupported type %T", v)}
+		}
+		if err != nil {
+			*errors = append(*errors, err)
+			return
+		}
+	case "feature_flags":
+		var err error
+		switch v := v.(type) {
+		case map[string]any:
+			for mk, mv := range v {
+				tk, mv = unwrapValue(mv, &lt)
+				b, ok := mv.(bool)
+				if !ok {
+					err = &configErr{tk, fmt.Sprintf("error parsing feature flag %q: expected bool, got %T", mk, mv)}
+					break
+				}
+				if o.FeatureFlags == nil {
+					o.FeatureFlags = make(map[string]bool)
+				}
+				o.FeatureFlags[mk] = b
+			}
+		default:
+			err = &configErr{tk, fmt.Sprintf("error parsing feature flags: unsupported type %T", v)}
 		}
 		if err != nil {
 			*errors = append(*errors, err)
@@ -1798,6 +1943,21 @@ func parseDuration(field string, tk token, v any, errors *[]error, warnings *[]e
 		}
 		*warnings = append(*warnings, err)
 		return time.Duration(v.(int64)) * time.Second
+	}
+}
+
+func parseWriteDeadlinePolicy(tk token, v string, errors *[]error) WriteTimeoutPolicy {
+	switch v {
+	case "default":
+		return WriteTimeoutPolicyDefault
+	case "close":
+		return WriteTimeoutPolicyClose
+	case "retry":
+		return WriteTimeoutPolicyRetry
+	default:
+		err := &configErr{tk, "write_timeout must be 'default', 'close' or 'retry'"}
+		*errors = append(*errors, err)
+		return WriteTimeoutPolicyDefault
 	}
 }
 
@@ -1975,6 +2135,10 @@ func parseCluster(v any, opts *Options, errors *[]error, warnings *[]error) erro
 			}
 		case "ping_max":
 			opts.Cluster.MaxPingsOut = int(mv.(int64))
+		case "write_deadline":
+			opts.Cluster.WriteDeadline = parseDuration("write_deadline", tk, mv, errors, warnings)
+		case "write_timeout":
+			opts.Cluster.WriteTimeout = parseWriteDeadlinePolicy(tk, mv.(string), errors)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -2163,6 +2327,10 @@ func parseGateway(v any, o *Options, errors *[]error, warnings *[]error) error {
 			o.Gateway.Gateways = gateways
 		case "reject_unknown", "reject_unknown_cluster":
 			o.Gateway.RejectUnknown = mv.(bool)
+		case "write_deadline":
+			o.Gateway.WriteDeadline = parseDuration("write_deadline", tk, mv, errors, warnings)
+		case "write_timeout":
+			o.Gateway.WriteTimeout = parseWriteDeadlinePolicy(tk, mv.(string), errors)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -2260,7 +2428,7 @@ func parseJetStreamForAccount(v any, acc *Account, errors *[]error) error {
 			case "cluster_traffic":
 				vv, ok := mv.(string)
 				if !ok {
-					return &configErr{tk, fmt.Sprintf("Expected either 'system' or 'account' string value for %q, got %v", mk, mv)}
+					return &configErr{tk, fmt.Sprintf("Expected either 'system' or 'owner' string value for %q, got %v", mk, mv)}
 				}
 				switch vv {
 				case "system", _EMPTY_:
@@ -2454,6 +2622,9 @@ func parseJetStreamTPM(v interface{}, opts *Options, errors *[]error) error {
 func setJetStreamEkCipher(opts *Options, mv interface{}, tk token) error {
 	switch strings.ToLower(mv.(string)) {
 	case "chacha", "chachapoly":
+		if fips140.Enabled() {
+			return &configErr{tk, fmt.Sprintf("Cipher type %q cannot be used in FIPS-140 mode", mv)}
+		}
 		opts.JetStreamCipher = ChaCha
 	case "aes":
 		opts.JetStreamCipher = AES
@@ -2569,6 +2740,35 @@ func parseJetStream(v any, opts *Options, errors *[]error, warnings *[]error) er
 					return &configErr{tk, fmt.Sprintf("Expected a parseable size for %q, got %v", mk, mv)}
 				}
 				opts.JetStreamRequestQueueLimit = lim
+			case "info_queue_limit":
+				lim, ok := mv.(int64)
+				if !ok {
+					return &configErr{tk, fmt.Sprintf("Expected a parseable size for %q, got %v", mk, mv)}
+				}
+				opts.JetStreamInfoQueueLimit = lim
+			case "meta_compact":
+				thres, ok := mv.(int64)
+				if !ok || thres < 0 {
+					return &configErr{tk, fmt.Sprintf("Expected an absolute size for %q, got %v", mk, mv)}
+				}
+				opts.JetStreamMetaCompact = uint64(thres)
+			case "meta_compact_size":
+				s, err := getStorageSize(mv)
+				if err != nil {
+					return &configErr{tk, fmt.Sprintf("%s %s", strings.ToLower(mk), err)}
+				}
+				if s < 0 {
+					return &configErr{tk, fmt.Sprintf("Expected an absolute size for %q, got %v", mk, mv)}
+				}
+				opts.JetStreamMetaCompactSize = uint64(s)
+			case "meta_compact_sync":
+				opts.JetStreamMetaCompactSync = mv.(bool)
+			case "max_concurrent_io":
+				dios, ok := mv.(int64)
+				if !ok || dios < minConcurrentIOs || dios > maxConcurrentIOs {
+					return &configErr{tk, fmt.Sprintf("Expected an absolute size for %q between 4 and 8192, got %v", mk, mv)}
+				}
+				opts.JetStreamConcurrentIOs = int(dios)
 			default:
 				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{
@@ -2681,6 +2881,12 @@ func parseLeafNodes(v any, opts *Options, errors *[]error, warnings *[]error) er
 				*errors = append(*errors, err)
 				continue
 			}
+		case "isolate_leafnode_interest", "isolate":
+			opts.LeafNode.IsolateLeafnodeInterest = mv.(bool)
+		case "write_deadline":
+			opts.LeafNode.WriteDeadline = parseDuration("write_deadline", tk, mv, errors, warnings)
+		case "write_timeout":
+			opts.LeafNode.WriteTimeout = parseWriteDeadlinePolicy(tk, mv.(string), errors)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -2841,6 +3047,7 @@ func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteL
 	if !ok {
 		return nil, &configErr{tk, fmt.Sprintf("Expected remotes field to be an array, got %T", v)}
 	}
+	names := make(map[string]struct{})
 	remotes := make([]*RemoteLeafOpts, 0, len(ra))
 	for _, r := range ra {
 		tk, r = unwrapValue(r, &lt)
@@ -2851,6 +3058,7 @@ func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteL
 			continue
 		}
 		remote := &RemoteLeafOpts{}
+		var proxyToken token
 		for k, v := range rm {
 			tk, v = unwrapValue(v, &lt)
 			switch strings.ToLower(k) {
@@ -2964,6 +3172,10 @@ func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteL
 				default:
 					*errors = append(*errors, &configErr{tk, fmt.Sprintf("Expected boolean or map for jetstream_cluster_migrate, got %T", v)})
 				}
+			case "isolate_leafnode_interest", "isolate":
+				remote.LocalIsolation = v.(bool)
+			case "request_isolation":
+				remote.RequestIsolation = v.(bool)
 			case "compression":
 				if err := parseCompression(&remote.Compression, CompressionS2Auto, tk, k, v); err != nil {
 					*errors = append(*errors, err)
@@ -2973,6 +3185,40 @@ func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteL
 				remote.FirstInfoTimeout = parseDuration(k, tk, v, errors, warnings)
 			case "disabled":
 				remote.Disabled = v.(bool)
+			case "proxy":
+				proxyMap, ok := v.(map[string]any)
+				if !ok {
+					*errors = append(*errors, &configErr{tk, fmt.Sprintf("Expected proxy to be a map, got %T", v)})
+					continue
+				}
+				// Capture the token for the "proxy" field itself, before the map iteration
+				proxyToken = tk
+				for pk, pv := range proxyMap {
+					tk, pv = unwrapValue(pv, &lt)
+					switch strings.ToLower(pk) {
+					case "url":
+						remote.Proxy.URL = pv.(string)
+					case "username":
+						remote.Proxy.Username = pv.(string)
+					case "password":
+						remote.Proxy.Password = pv.(string)
+					case "timeout":
+						remote.Proxy.Timeout = parseDuration("proxy timeout", tk, pv, errors, warnings)
+					default:
+						if !tk.IsUsedVariable() {
+							err := &unknownConfigFieldErr{
+								field: pk,
+								configErr: configErr{
+									token: tk,
+								},
+							}
+							*errors = append(*errors, err)
+							continue
+						}
+					}
+				}
+			case "ignore_discovered_servers":
+				remote.IgnoreDiscoveredServers = v.(bool)
 			default:
 				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{
@@ -2986,6 +3232,22 @@ func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteL
 				}
 			}
 		}
+		// Use the saved proxy token for validation errors, not the last field token
+		if warns, err := validateLeafNodeProxyOptions(remote); err != nil {
+			*errors = append(*errors, &configErr{proxyToken, err.Error()})
+			continue
+		} else {
+			// Add any warnings about proxy configuration
+			for _, warn := range warns {
+				*warnings = append(*warnings, &configErr{proxyToken, warn})
+			}
+		}
+		rn := remote.name()
+		if _, dup := names[rn]; dup {
+			*errors = append(*errors, &configErr{tk, fmt.Sprintf("duplicate remote %s", remote.safeName())})
+			continue
+		}
+		names[rn] = struct{}{}
 		remotes = append(remotes, remote)
 	}
 	return remotes, nil
@@ -4298,6 +4560,10 @@ func parseAuthorization(v any, errors, warnings *[]error) (*authorization, error
 			}
 			auth.defaultPermissions = permissions
 		case "auth_callout", "auth_hook":
+			if fips140.Enabled() {
+				*errors = append(*errors, fmt.Errorf("'auth_callout' cannot be configured in FIPS-140 mode"))
+				continue
+			}
 			ac, err := parseAuthCallout(tk, errors)
 			if err != nil {
 				*errors = append(*errors, err)
@@ -5177,7 +5443,7 @@ func parseStringArray(fieldName string, tk token, lt *token, mv any, errors *[]e
 	}
 }
 
-func parseWebsocket(v any, o *Options, errors *[]error) error {
+func parseWebsocket(v any, o *Options, errors *[]error, warnings *[]error) error {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
@@ -5278,6 +5544,8 @@ func parseWebsocket(v any, o *Options, errors *[]error) error {
 					o.Websocket.Headers[key] = headerValue
 				}
 			}
+		case "ping_interval":
+			o.Websocket.PingInterval = parseDuration("ping_interval", tk, mv, errors, warnings)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -5858,6 +6126,12 @@ func setBaselineOptions(opts *Options) {
 	if opts.JetStreamRequestQueueLimit <= 0 {
 		opts.JetStreamRequestQueueLimit = JSDefaultRequestQueueLimit
 	}
+	if opts.JetStreamInfoQueueLimit <= 0 {
+		opts.JetStreamInfoQueueLimit = opts.JetStreamRequestQueueLimit
+	}
+	if opts.JetStreamConcurrentIOs <= 0 {
+		opts.JetStreamConcurrentIOs = defaultConcurrentIOs
+	}
 }
 
 func getDefaultAuthTimeout(tls *tls.Config, tlsTimeout float64) float64 {
@@ -6286,4 +6560,61 @@ func expandPath(p string) (string, error) {
 	}
 
 	return filepath.Join(home, p[1:]), nil
+}
+
+// RedactArgs redacts sensitive arguments from the command line.
+// For example, turns '--pass=secret' into '--pass=[REDACTED]'.
+func RedactArgs(args []string) {
+	secretArg := regexp.MustCompile("^-{1,2}(user|pass|auth)(=.*)?$")
+	routeURLArg := regexp.MustCompile("^-{1,2}(routes)(=.*)?$")
+	singleURLArg := regexp.MustCompile("^-{1,2}(cluster|cluster_listen)(=.*)?$")
+	for i, arg := range args {
+		switch {
+		case secretArg.MatchString(arg):
+			redactArgValue(args, i, func(_ string) string { return "[REDACTED]" })
+		case routeURLArg.MatchString(arg):
+			redactArgValue(args, i, redactURLListUser)
+		case singleURLArg.MatchString(arg):
+			redactArgValue(args, i, redactURLUser)
+		}
+	}
+}
+
+func redactArgValue(args []string, i int, redact func(string) string) {
+	if flag, value, ok := strings.Cut(args[i], "="); ok {
+		args[i] = flag + "=" + redact(value)
+	} else if i+1 < len(args) {
+		args[i+1] = redact(args[i+1])
+	}
+}
+
+func redactURLUser(raw string) string {
+	if !strings.Contains(raw, "@") {
+		return raw
+	}
+	parseValue := strings.TrimSpace(raw)
+	restoreRandom := false
+	if prefix, ok := strings.CutSuffix(parseValue, ":-1"); ok {
+		parseValue = prefix + ":0"
+		restoreRandom = true
+	}
+	u, err := url.Parse(parseValue)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	// url.String escapes brackets in userinfo, so use
+	// a placeholder here and rewrite it afterward.
+	u.User = url.User("_REDACTED_")
+	if restoreRandom {
+		u.Host = strings.TrimSuffix(u.Host, ":0") + ":-1"
+	}
+	return strings.Replace(u.String(), "_REDACTED_@", "[REDACTED]@", 1)
+}
+
+func redactURLListUser(raw string) string {
+	parts := strings.Split(raw, ",")
+	for i, part := range parts {
+		parts[i] = redactURLUser(part)
+	}
+	return strings.Join(parts, ",")
 }

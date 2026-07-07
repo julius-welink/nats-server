@@ -628,12 +628,10 @@ func TestNoRaceRouteMemUsage(t *testing.T) {
 
 func TestNoRaceRouteCache(t *testing.T) {
 	maxPerAccountCacheSize = 20
-	prunePerAccountCacheSize = 5
 	closedSubsCheckInterval = 250 * time.Millisecond
 
 	defer func() {
 		maxPerAccountCacheSize = defaultMaxPerAccountCacheSize
-		prunePerAccountCacheSize = defaultPrunePerAccountCacheSize
 		closedSubsCheckInterval = defaultClosedSubsCheckInterval
 	}()
 
@@ -723,35 +721,39 @@ func TestNoRaceRouteCache(t *testing.T) {
 					return nil
 				})
 			}
-			checkExpected(t, (maxPerAccountCacheSize+1)-(prunePerAccountCacheSize+1))
+
+			// Expect the cache to be full
+			checkExpected(t, maxPerAccountCacheSize)
 
 			// Wait for more than the orphan check
 			time.Sleep(2 * closedSubsCheckInterval)
 
-			// Add a new subs up to point where new prune would occur
-			sendReqs(t, requestor, prunePerAccountCacheSize+1, false)
+			// Add a new subs up to point where new prunes would occur
+			sendReqs(t, requestor, maxPerAccountCacheSize+1, false)
 
-			// Now closed subs should have been removed, so expected
-			// subs in the cache should be the new ones.
-			checkExpected(t, prunePerAccountCacheSize+1)
+			// Now closed subs should have been removed, but we have added
+			// new subs, so shouldn't exceed maxPerAccountCacheSize still
+			checkExpected(t, maxPerAccountCacheSize)
 
 			// Now try wil implicit unsubscribe (due to connection close)
 			sendReqs(t, requestor, maxPerAccountCacheSize+1, false)
 			requestor.Close()
 
-			checkExpected(t, maxPerAccountCacheSize-prunePerAccountCacheSize)
+			// Cache should be empty now due to implicit unsubscribes
+			checkExpected(t, 0)
 
 			// Wait for more than the orphan check
 			time.Sleep(2 * closedSubsCheckInterval)
 
-			// Now create new connection and send prunePerAccountCacheSize+1
+			// Now create new connection and send maxPerAccountCacheSize+1
 			// and that should cause all subs from previous connection to be
 			// removed from cache
 			requestor = natsConnect(t, bURL)
 			defer requestor.Close()
+			sendReqs(t, requestor, maxPerAccountCacheSize+1, false)
 
-			sendReqs(t, requestor, prunePerAccountCacheSize+1, false)
-			checkExpected(t, prunePerAccountCacheSize+1)
+			// We still won't have exceeded maxPerAccountCacheSize regardless
+			checkExpected(t, maxPerAccountCacheSize)
 		})
 	}
 }
@@ -1036,7 +1038,7 @@ func TestNoRaceAcceptLoopsDoNotLeaveOpenedConn(t *testing.T) {
 			defer s.Shutdown()
 
 			host, port := test.url(o)
-			url := fmt.Sprintf("%s:%d", host, port)
+			url := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 			var conns []net.Conn
 
 			wg := sync.WaitGroup{}
@@ -3606,7 +3608,7 @@ func TestNoRaceJetStreamClusterCorruptWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	ae, err := node.decodeAppendEntry(sm.msg, nil, _EMPTY_)
+	ae, err := decodeAppendEntry(sm.msg, nil, _EMPTY_)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -3965,7 +3967,7 @@ func TestNoRaceJetStreamClusterStreamSeqMismatchIssue(t *testing.T) {
 		if node == nil {
 			t.Fatalf("Could not get stream group")
 		}
-		if err := node.InstallSnapshot(mset.stateSnapshot()); err != nil {
+		if err := node.InstallSnapshot(mset.stateSnapshot(), false); err != nil {
 			t.Fatalf("Error installing snapshot: %v", err)
 		}
 	}
@@ -4055,7 +4057,7 @@ func TestNoRaceJetStreamClusterStreamDropCLFS(t *testing.T) {
 	if node == nil {
 		t.Fatalf("Could not get stream group")
 	}
-	if err := node.InstallSnapshot(mset.stateSnapshot()); err != nil {
+	if err := node.InstallSnapshot(mset.stateSnapshot(), false); err != nil {
 		t.Fatalf("Error installing snapshot: %v", err)
 	}
 
@@ -4162,7 +4164,7 @@ func TestNoRaceJetStreamConsumerFileStoreConcurrentDiskIO(t *testing.T) {
 
 	for i := 1; i <= n; i++ {
 		name := fmt.Sprintf("o%d", i)
-		o, err := fs.ConsumerStore(name, &ConsumerConfig{AckPolicy: AckExplicit})
+		o, err := fs.ConsumerStore(name, time.Time{}, &ConsumerConfig{AckPolicy: AckExplicit})
 		require_NoError(t, err)
 		wg.Add(1)
 		swg.Done()
@@ -5042,7 +5044,7 @@ func TestNoRaceJetStreamAccountLimitsAndRestartForceSnapshot(t *testing.T) {
 		mset, err := acc.lookupStream("TEST")
 		require_NoError(t, err)
 		n := mset.raftNode().(*raft)
-		require_NoError(t, n.InstallSnapshot(mset.stateSnapshot()))
+		require_NoError(t, n.InstallSnapshot(mset.stateSnapshot(), false))
 	}
 
 	c.stopAll()
@@ -6235,7 +6237,7 @@ func TestNoRaceJetStreamClusterEnsureWALCompact(t *testing.T) {
 	node := mset.raftNode()
 	require_True(t, node != nil)
 
-	err = node.InstallSnapshot(mset.stateSnapshot())
+	err = node.InstallSnapshot(mset.stateSnapshot(), false)
 	require_NoError(t, err)
 
 	// Now publish more than should be needed to cause an additional snapshot.
@@ -6266,7 +6268,7 @@ func TestNoRaceJetStreamClusterEnsureWALCompact(t *testing.T) {
 
 	snap, err := o.store.EncodedState()
 	require_NoError(t, err)
-	err = node.InstallSnapshot(snap)
+	err = node.InstallSnapshot(snap, false)
 	require_NoError(t, err)
 
 	received, done := 0, make(chan bool, 1)
@@ -6391,7 +6393,8 @@ func TestNoRaceFileStoreFilteredStateWithLargeDeletes(t *testing.T) {
 	defer debug.SetGCPercent(gcp)
 
 	start := time.Now()
-	fss := fs.FilteredState(1, _EMPTY_)
+	fss, err := fs.FilteredState(1, _EMPTY_)
+	require_NoError(t, err)
 	elapsed := time.Since(start)
 
 	require_True(t, fss.Msgs == uint64(toStore/2))
@@ -7610,8 +7613,10 @@ func TestNoRaceFileStoreNumPending(t *testing.T) {
 
 	check := func(sseq uint64, filter string) {
 		t.Helper()
-		np, lvs := fs.NumPending(sseq, filter, false)
-		ss := fs.FilteredState(sseq, filter)
+		np, lvs, err := fs.NumPending(sseq, filter, false)
+		require_NoError(t, err)
+		ss, err := fs.FilteredState(sseq, filter)
+		require_NoError(t, err)
 		sss := sanityCheck(sseq, filter)
 		if lvs != state.LastSeq {
 			t.Fatalf("Expected NumPending to return valid through last of %d but got %d", state.LastSeq, lvs)
@@ -7655,7 +7660,8 @@ func TestNoRaceFileStoreNumPending(t *testing.T) {
 
 	checkLastOnly := func(sseq uint64, filter string) {
 		t.Helper()
-		np, lvs := fs.NumPending(sseq, filter, true)
+		np, lvs, err := fs.NumPending(sseq, filter, true)
+		require_NoError(t, err)
 		ss := sanityCheckLastOnly(sseq, filter)
 		if lvs != state.LastSeq {
 			t.Fatalf("Expected NumPending to return valid through last of %d but got %d", state.LastSeq, lvs)

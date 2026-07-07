@@ -445,7 +445,7 @@ func TestMemStorePurgeExWithSubject(t *testing.T) {
 	}
 
 	// This should purge all.
-	ms.PurgeEx("foo", 1, 0)
+	ms.PurgeEx("foo", 0, 0)
 	require_True(t, ms.State().Msgs == 0)
 }
 
@@ -690,8 +690,12 @@ func TestMemStoreNumPending(t *testing.T) {
 
 	check := func(sseq uint64, filter string) {
 		t.Helper()
-		np, lvs := ms.NumPending(sseq, filter, false)
-		ss := ms.FilteredState(sseq, filter)
+		np, lvs, err := ms.NumPending(sseq, filter, false)
+		if err != nil {
+			t.Fatalf("NumPending error: %v", err)
+		}
+		ss, err := ms.FilteredState(sseq, filter)
+		require_NoError(t, err)
 		sss := sanityCheck(sseq, filter)
 		if lvs != state.LastSeq {
 			t.Fatalf("Expected NumPending to return valid through last of %d but got %d", state.LastSeq, lvs)
@@ -735,7 +739,10 @@ func TestMemStoreNumPending(t *testing.T) {
 
 	checkLastOnly := func(sseq uint64, filter string) {
 		t.Helper()
-		np, lvs := ms.NumPending(sseq, filter, true)
+		np, lvs, err := ms.NumPending(sseq, filter, true)
+		if err != nil {
+			t.Fatalf("NumPending error: %v", err)
+		}
 		ss := sanityCheckLastOnly(sseq, filter)
 		if lvs != state.LastSeq {
 			t.Fatalf("Expected NumPending to return valid through last of %d but got %d", state.LastSeq, lvs)
@@ -1112,7 +1119,8 @@ func TestMemStoreNumPendingMulti(t *testing.T) {
 	}
 
 	// Use new function.
-	total, _ := ms.NumPendingMulti(startSeq, filters, false)
+	total, _, err := ms.NumPendingMulti(startSeq, filters, false)
+	require_NoError(t, err)
 
 	// Check our results.
 	var checkTotal uint64
@@ -1143,7 +1151,8 @@ func TestMemStoreNumPendingBug(t *testing.T) {
 		ms.StoreMsg(subj, nil, nil, 0)
 		ms.StoreMsg(subj, nil, nil, 0)
 	}
-	total, _ := ms.NumPending(4, "foo.*", false)
+	total, _, err := ms.NumPending(4, "foo.*", false)
+	require_NoError(t, err)
 
 	var checkTotal uint64
 	var smv StoreMsg
@@ -1362,6 +1371,227 @@ func TestMemStoreMessageSchedule(t *testing.T) {
 	require_Equal(t, bytesToString(getHeader(JSScheduleNext, im.hdr)), JSScheduleNextPurge)
 }
 
+func TestMemStoreMessageScheduleEverySubSecondPrecision(t *testing.T) {
+	fs, err := newMemStore(
+		&StreamConfig{
+			Name: "TEST", Subjects: []string{"foo.*"}, Storage: MemoryStorage,
+			AllowMsgSchedules: true,
+		},
+	)
+	require_NoError(t, err)
+	defer fs.Stop()
+
+	// Capture message schedule proposals.
+	ch := make(chan *inMsg, 1)
+	fs.pmsgcb = func(im *inMsg) {
+		ch <- im
+	}
+
+	// Store a repeating message schedule with a sub-second remainder.
+	hdr := genHeader(nil, JSSchedulePattern, "@every 1500ms")
+	hdr = genHeader(hdr, JSScheduleTarget, "foo.target")
+	_, ts, err := fs.StoreMsg("foo.schedule", hdr, nil, 0)
+	require_NoError(t, err)
+
+	// We should have published a scheduled message.
+	im := require_ChanRead(t, ch, time.Second*3)
+	require_Equal(t, im.subj, "foo.target")
+	require_Equal(t, bytesToString(getHeader(JSScheduler, im.hdr)), "foo.schedule")
+
+	// The re-arm header is written with RFC3339Nano so the sub-second component
+	// of the next fire time survives the round trip through the header. Each
+	// fire time anchors on the previous one rounded to the nearest second, plus
+	// the interval: the first fire is round(store time) + 1500ms, and the
+	// re-arm rounds that again (up, .5s rounds away from zero) before adding
+	// another 1500ms.
+	const interval = 1500 * time.Millisecond
+	first := time.Unix(0, ts).UTC().Round(time.Second).Add(interval)
+	expected := first.Round(time.Second).Add(interval)
+	scheduleNext := bytesToString(getHeader(JSScheduleNext, im.hdr))
+	next, err := time.Parse(time.RFC3339Nano, scheduleNext)
+	require_NoError(t, err)
+	require_Equal(t, next.UnixNano(), expected.UnixNano())
+}
+
+func TestMemStoreNextWildcardMatch(t *testing.T) {
+	cfg := &StreamConfig{
+		Name:     "zzz",
+		Subjects: []string{"foo.>"},
+		Storage:  MemoryStorage,
+	}
+	ms, err := newMemStore(cfg)
+	require_NoError(t, err)
+	defer ms.Stop()
+
+	msg := []byte("msg")
+	storeN := func(subj string, n int) {
+		t.Helper()
+		for range n {
+			_, _, err := ms.StoreMsg(subj, nil, msg, 0)
+			require_NoError(t, err)
+		}
+	}
+	storeN("foo.bar.a", 1)
+	storeN("foo.baz.bar", 10)
+	storeN("foo.bar.b", 1)
+	storeN("foo.baz.bar", 10)
+	storeN("foo.baz.bar.no.match", 10)
+
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+
+	first, last, found := ms.nextWildcardMatchLocked("foo.bar.*", 0)
+	require_True(t, found)
+	require_Equal(t, first, 1)
+	require_Equal(t, last, 12)
+
+	first, last, found = ms.nextWildcardMatchLocked("foo.bar.*", 1)
+	require_True(t, found)
+	require_Equal(t, first, 1)
+	require_Equal(t, last, 12)
+
+	first, last, found = ms.nextWildcardMatchLocked("foo.bar.*", 2)
+	require_True(t, found)
+	require_Equal(t, first, 12)
+	require_Equal(t, last, 12)
+
+	_, _, found = ms.nextWildcardMatchLocked("foo.bar.*", first+1)
+	require_False(t, found)
+
+	first, last, found = ms.nextWildcardMatchLocked("foo.baz.*", 1)
+	require_True(t, found)
+	require_Equal(t, first, 2)
+	require_Equal(t, last, 22)
+
+	first, last, found = ms.nextWildcardMatchLocked("foo.baz.*", 11)
+	require_True(t, found)
+	require_Equal(t, first, 11)
+	require_Equal(t, last, 22)
+
+	first, last, found = ms.nextWildcardMatchLocked("foo.baz.*", 12)
+	require_True(t, found)
+	require_Equal(t, first, 12)
+	require_Equal(t, last, 22)
+
+	first, last, found = ms.nextWildcardMatchLocked("foo.baz.*", 22)
+	require_True(t, found)
+	require_Equal(t, first, 22)
+	require_Equal(t, last, 22)
+
+	first, last, found = ms.nextWildcardMatchLocked("foo.baz.*", 23)
+	require_False(t, found)
+	require_Equal(t, first, 0)
+	require_Equal(t, last, 0)
+
+	first, last, found = ms.nextWildcardMatchLocked("foo.nope.*", 1)
+	require_False(t, found)
+	require_Equal(t, first, 0)
+	require_Equal(t, last, 0)
+
+	first, last, found = ms.nextWildcardMatchLocked("foo.>", 1)
+	require_True(t, found)
+	require_Equal(t, first, 1)
+	require_Equal(t, last, 32)
+}
+
+func TestMemStoreNextLiteralMatch(t *testing.T) {
+	cfg := &StreamConfig{
+		Name:     "zzz",
+		Subjects: []string{"foo.>"},
+		Storage:  MemoryStorage,
+	}
+	ms, err := newMemStore(cfg)
+	require_NoError(t, err)
+	defer ms.Stop()
+
+	msg := []byte("msg")
+	storeN := func(subj string, n int) {
+		t.Helper()
+		for range n {
+			_, _, err := ms.StoreMsg(subj, nil, msg, 0)
+			require_NoError(t, err)
+		}
+	}
+	storeN("foo.bar.a", 1)             // seq 1
+	storeN("foo.baz.bar", 10)          // seqs 2-11
+	storeN("foo.bar.b", 1)             // seq 12
+	storeN("foo.baz.bar", 10)          // seqs 13-22
+	storeN("foo.baz.bar.no.match", 10) // seqs 23-32
+
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+
+	first, last, found := ms.nextLiteralMatchLocked("foo.bar.a", 0)
+	require_True(t, found)
+	require_Equal(t, first, 1)
+	require_Equal(t, last, 1)
+
+	_, _, found = ms.nextLiteralMatchLocked("foo.bar.a", 2)
+	require_False(t, found)
+
+	first, last, found = ms.nextLiteralMatchLocked("foo.baz.bar", 1)
+	require_True(t, found)
+	require_Equal(t, first, 2)
+	require_Equal(t, last, 22)
+
+	first, last, found = ms.nextLiteralMatchLocked("foo.baz.bar", 11)
+	require_True(t, found)
+	require_Equal(t, first, 11)
+	require_Equal(t, last, 22)
+
+	first, last, found = ms.nextLiteralMatchLocked("foo.baz.bar", 22)
+	require_True(t, found)
+	require_Equal(t, first, 22)
+	require_Equal(t, last, 22)
+
+	first, last, found = ms.nextLiteralMatchLocked("foo.baz.bar", 23)
+	require_False(t, found)
+	require_Equal(t, first, 0)
+	require_Equal(t, last, 0)
+
+	first, last, found = ms.nextLiteralMatchLocked("foo.nope", 1)
+	require_False(t, found)
+	require_Equal(t, first, 0)
+	require_Equal(t, last, 0)
+
+}
+
+func TestMemStoreMultiLastSeqsDoesNotUseStaleLastValue(t *testing.T) {
+	cfg := &StreamConfig{
+		Name:     "zzz",
+		Subjects: []string{"foo", "bar", "baz"},
+		Storage:  MemoryStorage,
+	}
+	ms, err := newMemStore(cfg)
+	require_NoError(t, err)
+	defer ms.Stop()
+
+	subjects := []string{"foo", "bar", "foo", " baz", "foo", "foo", "bar", "foo", "bar", "baz"}
+	for _, s := range subjects {
+		_, _, err := ms.StoreMsg(s, nil, nil, 0)
+		require_NoError(t, err)
+	}
+
+	// Initially we expect last seq for `foo` to be 8
+	seqs, err := ms.MultiLastSeqs([]string{"foo", "bar"}, 0, 0)
+	require_NoError(t, err)
+	require_Equal(t, len(seqs), 2)
+	require_Equal(t, seqs[0], uint64(8))
+
+	// Remove latest foo message
+	removed, err := ms.RemoveMsg(8)
+	require_NoError(t, err)
+	require_True(t, removed)
+
+	// If bug is present: MultiLastSeqs returns last sequence
+	// 8 for subject `foo`.
+	// After removal, expect last sequence 6 for subject `foo`.
+	seqs, err = ms.MultiLastSeqs([]string{"foo", "bar"}, 0, 0)
+	require_NoError(t, err)
+	require_Equal(t, len(seqs), 2)
+	require_Equal(t, seqs[0], uint64(6))
+}
+
 ///////////////////////////////////////////////////////////////////////////
 // Benchmarks
 ///////////////////////////////////////////////////////////////////////////
@@ -1379,14 +1609,15 @@ func Benchmark_MemStoreNumPendingWithLargeInteriorDeletesScan(b *testing.B) {
 	msg := []byte("abc")
 	ms.StoreMsg("foo.bar.baz", nil, msg, 0)
 	for i := 1; i <= 1_000_000; i++ {
-		ms.SkipMsg()
+		ms.SkipMsg(0)
 	}
 	ms.StoreMsg("foo.bar.baz", nil, msg, 0)
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		total, _ := ms.NumPending(600_000, "foo.*.baz", false)
+		total, _, err := ms.NumPending(600_000, "foo.*.baz", false)
+		require_NoError(b, err)
 		if total != 1 {
 			b.Fatalf("Expected total of 2 got %d", total)
 		}
@@ -1406,14 +1637,15 @@ func Benchmark_MemStoreNumPendingWithLargeInteriorDeletesExclude(b *testing.B) {
 	msg := []byte("abc")
 	ms.StoreMsg("foo.bar.baz", nil, msg, 0)
 	for i := 1; i <= 1_000_000; i++ {
-		ms.SkipMsg()
+		ms.SkipMsg(0)
 	}
 	ms.StoreMsg("foo.bar.baz", nil, msg, 0)
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		total, _ := ms.NumPending(400_000, "foo.*.baz", false)
+		total, _, err := ms.NumPending(400_000, "foo.*.baz", false)
+		require_NoError(b, err)
 		if total != 1 {
 			b.Fatalf("Expected total of 2 got %d", total)
 		}
@@ -1446,4 +1678,114 @@ func Benchmark_MemStoreSubjectStateConsistencyOptimizationPerf(b *testing.B) {
 			require_NoError(b, err)
 		}
 	}
+}
+
+// This benchmark populates a memstore and then measures
+// the time it takes to load the entire store using
+// LoadNextMsg repeatedly until the store returns ErrStoreEOF.
+func Benchmark_MemStoreLoadNextMsgFiltered(b *testing.B) {
+	cases := []struct {
+		name             string
+		msgs             int
+		matchingMsgEvery int
+		filter           string
+		wc               bool
+		matchingSubject  func(i int) string
+		expectLinear     bool
+	}{
+		{
+			name:             "wildcard_linear_scan",
+			msgs:             10_000_000,
+			matchingMsgEvery: 10_000,
+			filter:           "foo.baz.*",
+			wc:               true,
+			matchingSubject: func(i int) string {
+				return fmt.Sprintf("foo.baz.%d", i)
+			},
+			expectLinear: true,
+		},
+		{
+			name:             "wildcard_bounded_scan",
+			msgs:             10_000_000,
+			matchingMsgEvery: 100_000,
+			filter:           "foo.baz.*",
+			wc:               true,
+			matchingSubject: func(i int) string {
+				return fmt.Sprintf("foo.baz.%d", i)
+			},
+			expectLinear: false,
+		},
+		{
+			name:             "literal_bounded_scan",
+			msgs:             10_000_000,
+			matchingMsgEvery: 100_000,
+			filter:           "foo.baz",
+			wc:               false,
+			matchingSubject: func(i int) string {
+				return "foo.baz"
+			},
+			expectLinear: false,
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			cfg := &StreamConfig{Name: "TEST", Subjects: []string{"foo.>"}, Storage: MemoryStorage}
+			ms, err := newMemStore(cfg)
+			require_NoError(b, err)
+			defer ms.Stop()
+
+			msg := []byte("ok")
+			for i := range tc.msgs {
+				subject := "foo.bar"
+				if i%tc.matchingMsgEvery == 0 {
+					subject = tc.matchingSubject(i)
+				}
+				_, _, err = ms.StoreMsg(subject, nil, msg, 0)
+				require_NoError(b, err)
+			}
+
+			ms.mu.Lock()
+			require_Equal(b, ms.shouldLinearScan(tc.filter, tc.wc, 1), tc.expectLinear)
+			ms.mu.Unlock()
+
+			var smv StoreMsg
+			expectedMatches := uint64(tc.msgs / tc.matchingMsgEvery)
+
+			b.ResetTimer()
+			for b.Loop() {
+				var start uint64
+				var count uint64
+				for {
+					_, start, err = ms.LoadNextMsg(tc.filter, tc.wc, start, &smv)
+					start++
+					if err == ErrStoreEOF {
+						require_Equal(b, count, expectedMatches)
+						break
+					}
+					require_NoError(b, err)
+					count++
+				}
+			}
+		})
+	}
+}
+
+func TestMemStoreMultiLastSeqsDoesNotReorderConfigSubjects(t *testing.T) {
+	subjects := []string{"orders.*", "billing.*"}
+	ms, err := newMemStore(&StreamConfig{Name: "zzz", Storage: MemoryStorage, Subjects: subjects})
+	require_NoError(t, err)
+
+	_, _, err = ms.StoreMsg("orders.1", nil, []byte("x"), 0)
+	require_NoError(t, err)
+	_, _, err = ms.StoreMsg("billing.1", nil, []byte("x"), 0)
+	require_NoError(t, err)
+
+	// Filter count == subject count drives the filterIsAll path.
+	_, err = ms.MultiLastSeqs([]string{"orders.*", "billing.*"}, 0, 0)
+	require_NoError(t, err)
+
+	// The advertised config subjects must keep their original order.
+	require_Equal(t, ms.cfg.Subjects[0], "orders.*")
+	require_Equal(t, ms.cfg.Subjects[1], "billing.*")
 }

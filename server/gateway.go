@@ -956,8 +956,9 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 // Builds and sends the CONNECT protocol for a gateway.
 // Client lock held on entry.
 func (c *client) sendGatewayConnect(opts *Options) {
-	// FIXME: This can race with updateRemotesTLSConfig
+	c.gw.cfg.RLock()
 	tlsRequired := c.gw.cfg.TLSConfig != nil
+	c.gw.cfg.RUnlock()
 	url := c.gw.connectURL
 	c.gw.connectURL = nil
 	var user, pass string
@@ -1156,9 +1157,7 @@ func (c *client) processGatewayInfo(info *Info) {
 				// defensive code above that if we did not register this connection
 				// because we already have an outbound for this name, then
 				// close this connection (and make sure it does not try to reconnect)
-				c.mu.Lock()
-				c.flags.set(noReconnect)
-				c.mu.Unlock()
+				c.setNoReconnect()
 				c.closeConnection(WrongGateway)
 				return
 			}
@@ -1981,7 +1980,7 @@ func (c *client) processGatewayRUnsub(arg []byte) error {
 		return nil
 	} else {
 		// Plain sub, assume optimistic sends, create entry.
-		e = &outsie{ni: make(map[string]struct{}), sl: NewSublistWithCache()}
+		e = &outsie{ni: make(map[string]struct{}), sl: NewSublistForServer(c.srv)}
 		newe = true
 	}
 	// This is when a sub or queue sub is supposed to be in
@@ -2090,7 +2089,7 @@ func (c *client) processGatewayRSub(arg []byte) error {
 	} else if queue == nil {
 		return nil
 	} else {
-		e = &outsie{ni: make(map[string]struct{}), sl: NewSublistWithCache()}
+		e = &outsie{ni: make(map[string]struct{}), sl: NewSublistForServer(c.srv)}
 		newe = true
 		useSl = true
 	}
@@ -2561,12 +2560,10 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 		return false
 	}
 
+	// Copy off original pa in case it changes.
+	pa := c.pa
+
 	mt, _ := c.isMsgTraceEnabled()
-	if mt != nil {
-		pa := c.pa
-		msg = mt.setOriginAccountHeaderIfNeeded(c, acc, msg)
-		defer func() { c.pa = pa }()
-	}
 
 	var (
 		queuesa    = [512]byte{}
@@ -2579,6 +2576,7 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 		didDeliver bool
 		prodIsMQTT = c.isMqtt()
 		dlvMsgs    int64
+		dlvExtraSz int64
 	)
 
 	// Get a subscription from the pool
@@ -2676,8 +2674,11 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 			}
 		}
 
+		// Assume original message
+		dmsg := msg
 		if mt != nil {
-			msg = mt.setHopHeader(c, msg)
+			// If trace is enabled, we need to set the hop header per gateway.
+			dmsg = mt.setHopHeader(c, dmsg)
 		}
 
 		// Setup the message header.
@@ -2727,16 +2728,22 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 		sub.nm, sub.max = 0, 0
 		sub.client = gwc
 		sub.subject = subject
-		if c.deliverMsg(prodIsMQTT, sub, acc, subject, mreply, mh, msg, false) {
+		if c.deliverMsg(prodIsMQTT, sub, acc, subject, mreply, mh, dmsg, false) {
 			// We don't count internal deliveries so count only if sub.icb is nil
 			if sub.icb == nil {
 				dlvMsgs++
+				dlvExtraSz += int64(len(dmsg) - len(msg))
 			}
 			didDeliver = true
 		}
+
+		// If we set the header reset the origin pub args.
+		if mt != nil {
+			c.pa = pa
+		}
 	}
 	if dlvMsgs > 0 {
-		totalBytes := dlvMsgs * int64(len(msg))
+		totalBytes := dlvMsgs*int64(len(msg)) + dlvExtraSz
 		// For non MQTT producers, remove the CR_LF * number of messages
 		if !prodIsMQTT {
 			totalBytes -= dlvMsgs * int64(LEN_CR_LF)
@@ -2933,6 +2940,16 @@ func getSubjectFromGWRoutedReply(reply []byte, isOldPrefix bool) []byte {
 		return reply[oldGWReplyStart:]
 	}
 	return reply[gwSubjectOffset:]
+}
+
+// Returns the subject embedded in the given routed
+// reply subject and whether the prefix was stripped.
+// If the subject is not routed, returns it unchanged.
+func getGWRoutedSubjectOrSelf(subject []byte) ([]byte, bool) {
+	if isGWPrefix, oldPrefix := isGWRoutedSubjectAndIsOldPrefix(subject); isGWPrefix {
+		return getSubjectFromGWRoutedReply(subject, oldPrefix), true
+	}
+	return subject, false
 }
 
 // This should be invoked only from processInboundGatewayMsg() or
@@ -3184,7 +3201,7 @@ func (c *client) gatewayAllSubsReceiveStart(info *Info) {
 		e.mode = Transitioning
 		e.Unlock()
 	} else {
-		e := &outsie{sl: NewSublistWithCache()}
+		e := &outsie{sl: NewSublistForServer(c.srv)}
 		e.mode = Transitioning
 		c.mu.Lock()
 		c.gw.outsim.Store(account, e)

@@ -227,6 +227,14 @@ func (s *Server) rateLimitFormatWarnf(format string, v ...any) {
 	s.Warnf("%s", statement)
 }
 
+func (s *Server) RateLimitErrorf(format string, v ...any) {
+	statement := fmt.Sprintf(format, v...)
+	if _, loaded := s.rateLimitLogging.LoadOrStore(statement, time.Now()); loaded {
+		return
+	}
+	s.Errorf("%s", statement)
+}
+
 func (s *Server) RateLimitWarnf(format string, v ...any) {
 	statement := fmt.Sprintf(format, v...)
 	if _, loaded := s.rateLimitLogging.LoadOrStore(statement, time.Now()); loaded {
@@ -245,6 +253,10 @@ func (s *Server) RateLimitDebugf(format string, v ...any) {
 
 // Fatalf logs a fatal error
 func (s *Server) Fatalf(format string, v ...any) {
+	if s.isShuttingDown() {
+		s.Errorf(format, v)
+		return
+	}
 	s.executeLogCall(func(logger Logger, format string, v ...any) {
 		logger.Fatalf(format, v...)
 	}, format, v...)

@@ -20,6 +20,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"reflect"
 	"slices"
@@ -40,6 +42,71 @@ func decodeAuthRequest(t *testing.T, ejwt []byte) (string, *jwt.ServerID, *jwt.C
 	ac, err := jwt.DecodeAuthorizationRequestClaims(string(ejwt))
 	require_NoError(t, err)
 	return ac.UserNkey, &ac.Server, &ac.ClientInformation, &ac.ConnectOptions, ac.TLS
+}
+
+func authCalloutMQTTConnectPacket(clientID, user, pass string) []byte {
+	flags := byte(mqttConnFlagCleanSession)
+	if user != _EMPTY_ {
+		flags |= mqttConnFlagUsernameFlag
+	}
+	if pass != _EMPTY_ {
+		flags |= mqttConnFlagPasswordFlag
+	}
+
+	pkLen := 2 + len(mqttProtoName) +
+		1 +
+		1 +
+		2 +
+		2 + len(clientID)
+
+	if user != _EMPTY_ {
+		pkLen += 2 + len(user)
+	}
+	if pass != _EMPTY_ {
+		pkLen += 2 + len(pass)
+	}
+
+	w := newMQTTWriter(0)
+	w.WriteByte(mqttPacketConnect)
+	w.WriteVarInt(pkLen)
+	w.WriteString(string(mqttProtoName))
+	w.WriteByte(0x4)
+	w.WriteByte(flags)
+	w.WriteUint16(0)
+	w.WriteString(clientID)
+	if user != _EMPTY_ {
+		w.WriteString(user)
+	}
+	if pass != _EMPTY_ {
+		w.WriteBytes([]byte(pass))
+	}
+	return w.Bytes()
+}
+
+func authCalloutMQTTConnect(t testing.TB, host string, port int, clientID, user, pass string) (net.Conn, byte) {
+	t.Helper()
+
+	c, err := net.Dial("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+	require_NoError(t, err)
+
+	c.SetDeadline(time.Now().Add(2 * time.Second))
+	defer c.SetDeadline(time.Time{})
+
+	_, err = c.Write(authCalloutMQTTConnectPacket(clientID, user, pass))
+	require_NoError(t, err)
+
+	var ack [4]byte
+	_, err = io.ReadFull(c, ack[:])
+	require_NoError(t, err)
+	if ack[0] != mqttPacketConnectAck || ack[1] != 2 {
+		t.Fatalf("Expected MQTT CONNACK, got %v", ack[:])
+	}
+	return c, ack[3]
+}
+
+func TestTitleCaseEmptyString(t *testing.T) {
+	defer require_NoPanic(t)
+	require_Equal(t, titleCase(_EMPTY_), _EMPTY_)
 }
 
 const (
@@ -273,8 +340,9 @@ func TestAuthCalloutBasics(t *testing.T) {
 	userInfo := response.Data.(*UserInfo)
 
 	dlc := &UserInfo{
-		UserID:  "dlc",
-		Account: globalAccountName,
+		UserID:      "dlc",
+		Account:     globalAccountName,
+		AccountName: globalAccountName,
 		Permissions: &Permissions{
 			Publish: &SubjectPermission{
 				Allow: []string{"$SYS.>"},
@@ -306,8 +374,9 @@ func TestAuthCalloutBasics(t *testing.T) {
 	userInfo = response.Data.(*UserInfo)
 	dlc = &UserInfo{
 		// Token MUST NOT be exposed in user info.
-		UserID:  "[REDACTED]",
-		Account: globalAccountName,
+		UserID:      "[REDACTED]",
+		Account:     globalAccountName,
+		AccountName: globalAccountName,
 		Permissions: &Permissions{
 			Publish: &SubjectPermission{
 				Allow: []string{"$SYS.>"},
@@ -324,6 +393,143 @@ func TestAuthCalloutBasics(t *testing.T) {
 	if expires > 10*time.Minute || expires < (10*time.Minute-5*time.Second) {
 		t.Fatalf("Expected expires of ~%v, got %v", 10*time.Minute, expires)
 	}
+}
+
+func TestAuthCalloutUpdateAccountClaimsClearsExternalAuthorization(t *testing.T) {
+	opts := defaultServerOptions
+	s := New(&opts)
+	defer s.Shutdown()
+
+	_, authAccPub := createKey(t)
+	_, authUserPub := createKey(t)
+	_, allowedAccPub := createKey(t)
+	_, deniedAccPub := createKey(t)
+
+	authAcc, err := s.RegisterAccount(authAccPub)
+	require_NoError(t, err)
+
+	claim := jwt.NewAccountClaims(authAccPub)
+	claim.Name = "AUTH"
+	claim.EnableExternalAuthorization(authUserPub)
+	claim.Authorization.AllowedAccounts.Add(allowedAccPub)
+	claim.Authorization.XKey = "test-xkey"
+	s.UpdateAccountClaims(authAcc, claim)
+
+	require_True(t, authAcc.hasExternalAuth())
+	require_True(t, authAcc.isExternalAuthUser(authUserPub))
+	require_True(t, authAcc.isAllowedAcount(allowedAccPub))
+	require_False(t, authAcc.isAllowedAcount(deniedAccPub))
+	require_Equal(t, authAcc.externalAuthXKey(), "test-xkey")
+
+	claim = jwt.NewAccountClaims(authAccPub)
+	claim.Name = "AUTH"
+	s.UpdateAccountClaims(authAcc, claim)
+
+	require_False(t, authAcc.hasExternalAuth())
+	require_False(t, authAcc.isExternalAuthUser(authUserPub))
+	require_False(t, authAcc.isAllowedAcount(allowedAccPub))
+	require_Equal(t, authAcc.externalAuthXKey(), _EMPTY_)
+}
+
+func TestAuthCalloutMQTTJwtPassedInConnectOptions(t *testing.T) {
+	storeDir := t.TempDir()
+	conf := fmt.Sprintf(`
+		listen: "127.0.0.1:-1"
+		server_name: A
+		jetstream: { max_mem_store: 256MB, max_file_store: 1GB, store_dir: %q }
+		mqtt { host: "127.0.0.1", port: -1 }
+		authorization {
+			timeout: 1s
+			users: [ { user: "auth", password: "pwd" } ]
+			auth_callout {
+				issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
+				auth_users: [ auth ]
+			}
+		}
+	`, storeDir)
+
+	ukp, err := nkeys.CreateUser()
+	require_NoError(t, err)
+	upub, err := ukp.PublicKey()
+	require_NoError(t, err)
+	expectedJWT := createAuthUser(t, upub, _EMPTY_, globalAccountName, "", nil, 10*time.Minute, nil)
+	seenJWT := make(chan string, 1)
+	handler := func(m *nats.Msg) {
+		user, si, _, opts, _ := decodeAuthRequest(t, m.Data)
+		select {
+		case seenJWT <- opts.JWT:
+		default:
+		}
+		if opts.JWT != expectedJWT {
+			m.Respond(nil)
+			return
+		}
+		ujwt := createAuthUser(t, user, _EMPTY_, globalAccountName, "", nil, 10*time.Minute, nil)
+		m.Respond(serviceResponse(t, user, si.ID, ujwt, "", 0))
+	}
+
+	at := NewAuthTest(t, conf, handler, nats.UserInfo("auth", "pwd"))
+	defer at.Cleanup()
+
+	mc, rc := authCalloutMQTTConnect(t, at.srv.getOpts().MQTT.Host, at.srv.getOpts().MQTT.Port, "mqtt-auth-callout", "ignored", expectedJWT)
+	defer mc.Close()
+
+	select {
+	case got := <-seenJWT:
+		require_Equal(t, got, expectedJWT)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Did not receive auth callout request")
+	}
+	require_Equal(t, rc, mqttConnAckRCConnectionAccepted)
+}
+
+func TestAuthCalloutNonOperatorMQTTOpaquePassword(t *testing.T) {
+	storeDir := t.TempDir()
+	conf := fmt.Sprintf(`
+		listen: "127.0.0.1:-1"
+		server_name: A
+		jetstream: { max_mem_store: 256MB, max_file_store: 1GB, store_dir: %q }
+		mqtt { host: "127.0.0.1", port: -1 }
+		authorization {
+			timeout: 1s
+			users: [ { user: "auth", password: "pwd" } ]
+			auth_callout {
+				issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
+				auth_users: [ auth ]
+			}
+		}
+	`, storeDir)
+
+	const opaquePassword = "external-jwt-or-token"
+	type seenConnectOptions struct {
+		jwt      string
+		password string
+	}
+	seen := make(chan seenConnectOptions, 1)
+	handler := func(m *nats.Msg) {
+		user, si, _, opts, _ := decodeAuthRequest(t, m.Data)
+		select {
+		case seen <- seenConnectOptions{jwt: opts.JWT, password: opts.Password}:
+		default:
+		}
+		if opts.JWT != _EMPTY_ || opts.Password != opaquePassword {
+			m.Respond(nil)
+			return
+		}
+		ujwt := createAuthUser(t, user, _EMPTY_, globalAccountName, "", nil, 10*time.Minute, nil)
+		m.Respond(serviceResponse(t, user, si.ID, ujwt, "", 0))
+	}
+
+	at := NewAuthTest(t, conf, handler, nats.UserInfo("auth", "pwd"))
+	defer at.Cleanup()
+
+	mc, rc := authCalloutMQTTConnect(t, at.srv.getOpts().MQTT.Host, at.srv.getOpts().MQTT.Port, "mqtt-auth-callout", "ignored", opaquePassword)
+	defer mc.Close()
+
+	got := require_ChanRead(t, seen, 2*time.Second)
+	require_Equal(t, got.jwt, _EMPTY_)
+	require_Equal(t, got.password, opaquePassword)
+	require_Equal(t, rc, mqttConnAckRCConnectionAccepted)
 }
 
 func TestAuthCalloutMultiAccounts(t *testing.T) {
@@ -585,8 +791,9 @@ func TestAuthCalloutVerifiedUserCalloutsWithSig(t *testing.T) {
 	userInfo := response.Data.(*UserInfo)
 
 	dlc := &UserInfo{
-		UserID:  "UBO2MQV67TQTVIRV3XFTEZOACM4WLOCMCDMAWN5QVN5PI2N6JHTVDRON",
-		Account: globalAccountName,
+		UserID:      "UBO2MQV67TQTVIRV3XFTEZOACM4WLOCMCDMAWN5QVN5PI2N6JHTVDRON",
+		Account:     globalAccountName,
+		AccountName: globalAccountName,
 		Permissions: &Permissions{
 			Publish: &SubjectPermission{
 				Deny: []string{AuthCalloutSubject}, // Will be auto-added since in auth account.
@@ -802,8 +1009,10 @@ func TestAuthCalloutOperatorModeBasics(t *testing.T) {
 
 	userInfo := response.Data.(*UserInfo)
 	expected := &UserInfo{
-		UserID:  upub,
-		Account: apub,
+		UserID:      upub,
+		Account:     apub,
+		AccountName: "AUTH",
+		UserName:    "auth-service",
 		Permissions: &Permissions{
 			Publish: &SubjectPermission{
 				Deny: []string{AuthCalloutSubject}, // Will be auto-added since in auth account.
@@ -986,8 +1195,10 @@ func testAuthCalloutScopedUser(t *testing.T, allowAnyAccount bool) {
 
 	userInfo := response.Data.(*UserInfo)
 	expected := &UserInfo{
-		UserID:  upub,
-		Account: apub,
+		UserID:      upub,
+		Account:     apub,
+		AccountName: "AUTH",
+		UserName:    "auth-service",
 		Permissions: &Permissions{
 			Publish: &SubjectPermission{
 				Deny: []string{AuthCalloutSubject}, // Will be auto-added since in auth account.
@@ -2491,4 +2702,420 @@ func TestAuthCalloutProxyRequiredInUserNotInAuthJWT(t *testing.T) {
 
 	// Auth callout should have been invoked once.
 	require_Equal(t, 1, int(invoked.Load()))
+}
+
+func TestAuthCalloutOperatorModeMismatchedCalloutCreds(t *testing.T) {
+	_, spub := createKey(t)
+	sysClaim := jwt.NewAccountClaims(spub)
+	sysClaim.Name = "$SYS"
+	sysJwt, err := sysClaim.Encode(oKp)
+	require_NoError(t, err)
+
+	// AUTH callout service account.
+	ckp, err := nkeys.FromSeed([]byte(authCalloutIssuerSeed))
+	require_NoError(t, err)
+	cpk, err := ckp.PublicKey()
+	require_NoError(t, err)
+
+	// The authorized user for the service.
+	upub, _ := createAuthServiceUser(t, ckp)
+
+	authClaim := jwt.NewAccountClaims(cpk)
+	authClaim.Name = "AUTH"
+	authClaim.EnableExternalAuthorization(upub)
+	authClaim.Authorization.AllowedAccounts.Add("*")
+	authJwt, err := authClaim.Encode(oKp)
+	require_NoError(t, err)
+
+	conf := createConfFile(t, []byte(fmt.Sprintf(`
+		listen: 127.0.0.1:-1
+		operator: %s
+		system_account: %s
+		resolver: MEM
+		resolver_preload: {
+			%s: %s
+			%s: %s
+		}
+    `, ojwt, spub, cpk, authJwt, spub, sysJwt)))
+
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	// Create mismatched creds for the auth service user:
+	// JWT with the auth user's public key, but a different seed.
+	ukpBad, _ := nkeys.CreateUser()
+	seedBad, _ := ukpBad.Seed()
+
+	uclaim := newJWTTestUserClaims()
+	uclaim.Name = "auth-service"
+	uclaim.Subject = upub // auth user's public key
+	ujwt, err := uclaim.Encode(ckp)
+	require_NoError(t, err)
+	badCreds := genCredsFile(t, ujwt, seedBad)
+	defer removeFile(t, badCreds)
+
+	// Client auth will time out because the callout service didn't connect.
+	_, err = nats.Connect(s.ClientURL(), nats.UserCredentials(badCreds), nats.MaxReconnects(0))
+	require_Error(t, err)
+
+	// Server should still be running.
+	time.Sleep(500 * time.Millisecond)
+	require_True(t, s.Running())
+}
+
+func TestAuthCalloutLeafNodeOperatorModeMismatchedCreds(t *testing.T) {
+	_, spub := createKey(t)
+	sysClaim := jwt.NewAccountClaims(spub)
+	sysClaim.Name = "$SYS"
+	sysJwt, err := sysClaim.Encode(oKp)
+	require_NoError(t, err)
+
+	// A account.
+	akp, apk := createKey(t)
+	aClaim := jwt.NewAccountClaims(apk)
+	aClaim.Name = "A"
+	aJwt, err := aClaim.Encode(oKp)
+	require_NoError(t, err)
+
+	// AUTH callout service account.
+	ckp, err := nkeys.FromSeed([]byte(authCalloutIssuerSeed))
+	require_NoError(t, err)
+	cpk, err := ckp.PublicKey()
+	require_NoError(t, err)
+
+	// The authorized user for the service.
+	upub, creds := createAuthServiceUser(t, ckp)
+	defer removeFile(t, creds)
+
+	authClaim := jwt.NewAccountClaims(cpk)
+	authClaim.Name = "AUTH"
+	authClaim.EnableExternalAuthorization(upub)
+	authClaim.Authorization.AllowedAccounts.Add("*")
+	authJwt, err := authClaim.Encode(oKp)
+	require_NoError(t, err)
+
+	conf := fmt.Sprintf(`
+		listen: 127.0.0.1:-1
+		operator: %s
+		system_account: %s
+		resolver: MEM
+		resolver_preload: {
+			%s: %s
+			%s: %s
+			%s: %s
+		}
+		leafnodes {
+			listen: "127.0.0.1:-1"
+		}
+    `, ojwt, spub, cpk, authJwt, apk, aJwt, spub, sysJwt)
+
+	handler := func(m *nats.Msg) {
+		user, si, _, opts, _ := decodeAuthRequest(t, m.Data)
+		if opts.Token == "token" {
+			ujwt := createAuthUser(t, user, "user_a", apk, "", akp, 0, nil)
+			m.Respond(serviceResponse(t, user, si.ID, ujwt, "", 0))
+		} else {
+			m.Respond(nil)
+		}
+	}
+
+	at := NewAuthTest(t, conf, handler, nats.UserCredentials(creds))
+	defer at.Cleanup()
+
+	// Good leaf node connection.
+	lcreds := createBasicAccountLeaf(t, ckp)
+	defer removeFile(t, lcreds)
+
+	hopts := at.srv.getOpts()
+	lconf := createConfFile(t, []byte(fmt.Sprintf(`
+		listen: "127.0.0.1:-1"
+		server_name: "LEAF"
+		leafnodes {
+			remotes [
+				{
+					url: "nats://token@127.0.0.1:%d"
+					credentials: "%s"
+				}
+			]
+		}
+	`, hopts.LeafNode.Port, lcreds)))
+	leaf, _ := RunServerWithConfig(lconf)
+	defer leaf.Shutdown()
+	checkLeafNodeConnected(t, leaf)
+
+	// Now create a leaf with mismatched JWT/seed - JWT from one user,
+	// seed from another. This should not crash the server.
+	ukp1, _ := nkeys.CreateUser()
+	seed1, _ := ukp1.Seed()
+
+	ukp2, _ := nkeys.CreateUser()
+	upub2, _ := ukp2.PublicKey()
+
+	// Create JWT for user2 but pair with seed from user1.
+	uclaim := newJWTTestUserClaims()
+	uclaim.Subject = upub2
+	uclaim.Name = "mismatched-leaf"
+	ujwt, err := uclaim.Encode(ckp)
+	require_NoError(t, err)
+	badCreds := genCredsFile(t, ujwt, seed1)
+	defer removeFile(t, badCreds)
+
+	lconf2 := createConfFile(t, []byte(fmt.Sprintf(`
+		listen: "127.0.0.1:-1"
+		server_name: "BAD_LEAF"
+		leafnodes {
+			remotes [
+				{
+					url: "nats://token@127.0.0.1:%d"
+					credentials: "%s"
+				}
+			]
+		}
+	`, hopts.LeafNode.Port, badCreds)))
+	leaf2, _ := RunServerWithConfig(lconf2)
+	defer leaf2.Shutdown()
+
+	// Bad leaf should fail to connect but NOT crash the server.
+	time.Sleep(50 * time.Millisecond)
+	checkLeafNodeConnectedCount(t, leaf2, 0)
+
+	// Verify the hub server is still running and healthy.
+	checkLeafNodeConnectedCount(t, at.srv, 1)
+}
+
+func TestAuthCalloutRegisterWithAccountAfterClose(t *testing.T) {
+	conf := `
+		listen: "127.0.0.1:-1"
+		server_name: ZZ
+		accounts {
+			AUTH { users [ {user: "auth", password: "pwd"} ] }
+			FOO {}
+		}
+		authorization {
+			timeout: 1
+			auth_callout {
+				issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
+				account: AUTH
+				auth_users: [ auth ]
+			}
+		}
+	`
+	// Track whether the auth callout handler was called and collect the
+	// client pointer for manual registration later.
+	type calloutInfo struct {
+		user      string
+		serverID  string
+		processed chan struct{}
+	}
+	var ci calloutInfo
+	ci.processed = make(chan struct{})
+
+	handler := func(m *nats.Msg) {
+		user, si, _, opts, _ := decodeAuthRequest(t, m.Data)
+		if opts.Username == "zombie" && opts.Password == "pwd" {
+			ci.user = user
+			ci.serverID = si.ID
+			close(ci.processed)
+			// Do NOT respond. Let the auth callout timeout.
+			// This simulates the case where the response arrives late.
+		} else {
+			m.Respond(nil)
+		}
+	}
+
+	at := NewAuthTest(t, conf, handler, nats.UserInfo("auth", "pwd"))
+	defer at.Cleanup()
+	s := at.srv
+
+	fooAcc, err := s.lookupAccount("FOO")
+	require_NoError(t, err)
+	require_Equal(t, fooAcc.NumLocalConnections(), 0)
+	baseServerClients := s.NumClients()
+
+	// Connect a client that will go through auth callout. The handler will
+	// NOT respond, so the callout will timeout and the client will be closed.
+	var connectErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, connectErr = nats.Connect(s.ClientURL(),
+			nats.UserInfo("zombie", "pwd"),
+			nats.Timeout(5*time.Second),
+			nats.MaxReconnects(0),
+		)
+	}()
+
+	// Wait for the auth handler to be invoked (request received).
+	<-ci.processed
+
+	// Wait for auth timeout (1s) + closeConnection to complete.
+	<-done
+	require_Error(t, connectErr)
+	require_Equal(t, fooAcc.NumLocalConnections(), 0)
+	require_Equal(t, s.NumClients(), baseServerClients)
+
+	// Manually create a client, like auth callout would, so we have a reference to it and can close it.
+	globalAcc, err := s.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	c := &client{srv: s, kind: CLIENT, acc: globalAcc}
+	c.initClient()
+	globalAcc.addClient(c)
+	c.setNoReconnect()
+	c.closeConnection(ClientClosed)
+
+	// Simulate what processReply does after the auth callout response arrives:
+	// It calls c.RegisterNkeyUser which calls registerWithAccount(targetAcc).
+	// registerWithAccount should not add the client as we've closed it above.
+	require_Error(t, c.registerWithAccount(fooAcc), ErrConnectionClosed)
+	require_Equal(t, fooAcc.NumLocalConnections(), 0)
+}
+
+func TestAuthCalloutZombieInflatesAccountConnections(t *testing.T) {
+	conf := `
+		listen: "127.0.0.1:-1"
+		server_name: ZZ
+		accounts {
+			AUTH { users [ {user: "auth", password: "pwd"} ] }
+			FOO { limits { max_conn: 5 } }
+		}
+		authorization {
+			timeout: 1
+			auth_callout {
+				issuer: "ABJHLOVMPA4CI6R5KLNGOB4GSLNIY7IOUPAJC4YFNDLQVIOBYQGUWVLA"
+				account: AUTH
+				auth_users: [ auth ]
+			}
+		}
+	`
+
+	handler := func(m *nats.Msg) {
+		user, si, _, opts, _ := decodeAuthRequest(t, m.Data)
+		if opts.Username == "legit" && opts.Password == "pwd" {
+			ujwt := createAuthUser(t, user, _EMPTY_, "FOO", "", nil, 0, nil)
+			m.Respond(serviceResponse(t, user, si.ID, ujwt, "", 0))
+		} else {
+			m.Respond(nil)
+		}
+	}
+
+	at := NewAuthTest(t, conf, handler, nats.UserInfo("auth", "pwd"))
+	defer at.Cleanup()
+	s := at.srv
+
+	globalAcc := s.globalAccount()
+	fooAcc, err := s.lookupAccount("FOO")
+	require_NoError(t, err)
+
+	fooAcc.mu.RLock()
+	mconns := fooAcc.mconns
+	fooAcc.mu.RUnlock()
+	require_Equal(t, mconns, 5)
+
+	// Step 1: Inject zombie connections into FOO account.
+	// This simulates what happens when processReply calls registerWithAccount
+	// on a client that has already been through closeConnection.
+	for range 3 {
+		c := &client{srv: s, kind: CLIENT, acc: globalAcc}
+		c.initClient()
+		globalAcc.addClient(c)
+		c.closeConnection(ClientClosed)
+		require_Error(t, c.registerWithAccount(fooAcc), ErrConnectionClosed)
+	}
+	require_Equal(t, fooAcc.NumLocalConnections(), 0)
+
+	// Step 2: Connect legitimate clients. FOO has max_connections: 5.
+	// With 3 zombies, we should only be able to connect 2 real clients
+	// before hitting the limit, even though there are 0 real connections.
+	for range 5 {
+		nc, err := nats.Connect(s.ClientURL(),
+			nats.UserInfo("legit", "pwd"),
+			nats.MaxReconnects(0),
+		)
+		require_NoError(t, err)
+		//goland:noinspection GoDeferInLoop
+		defer nc.Close()
+	}
+	require_Equal(t, fooAcc.NumLocalConnections(), 5)
+}
+
+func TestAuthCalloutOperatorModeMQTTOpaquePasswordUsesDefaultSentinel(t *testing.T) {
+	_, spub := createKey(t)
+	sysClaim := jwt.NewAccountClaims(spub)
+	sysClaim.Name = "$SYS"
+	sysJwt, err := sysClaim.Encode(oKp)
+	require_NoError(t, err)
+
+	tkp, tpub := createKey(t)
+	accClaim := jwt.NewAccountClaims(tpub)
+	accClaim.Name = "TEST"
+	accClaim.Limits.JetStreamLimits.Consumer = -1
+	accClaim.Limits.JetStreamLimits.Streams = -1
+	accClaim.Limits.JetStreamLimits.MemoryStorage = 1024 * 1024
+	accClaim.Limits.JetStreamLimits.DiskStorage = 1024 * 1024
+	accJwt, err := accClaim.Encode(oKp)
+	require_NoError(t, err)
+
+	akp, err := nkeys.FromSeed([]byte(authCalloutIssuerSeed))
+	require_NoError(t, err)
+	apub, err := akp.PublicKey()
+	require_NoError(t, err)
+
+	upub, creds := createAuthServiceUser(t, akp)
+	defer removeFile(t, creds)
+
+	authClaim := jwt.NewAccountClaims(apub)
+	authClaim.Name = "AUTH"
+	authClaim.EnableExternalAuthorization(upub)
+	authClaim.Authorization.AllowedAccounts.Add(tpub)
+	authJwt, err := authClaim.Encode(oKp)
+	require_NoError(t, err)
+
+	defaultSentinel := createBasicAccountBearer(t, akp)
+	storeDir := t.TempDir()
+	conf := fmt.Sprintf(`
+		listen: "127.0.0.1:-1"
+		server_name: A
+		jetstream: { max_mem_store: 256MB, max_file_store: 1GB, store_dir: %q }
+		mqtt { host: "127.0.0.1", port: -1 }
+		operator: %s
+		system_account: %s
+		resolver: MEM
+		resolver_preload: {
+			%s: %s
+			%s: %s
+			%s: %s
+		}
+		default_sentinel: %s
+	`, storeDir, ojwt, spub, apub, authJwt, tpub, accJwt, spub, sysJwt, defaultSentinel)
+
+	const opaquePassword = "external-jwt-or-token"
+	type seenConnectOptions struct {
+		jwt      string
+		password string
+	}
+	seen := make(chan seenConnectOptions, 1)
+	handler := func(m *nats.Msg) {
+		user, si, _, opts, _ := decodeAuthRequest(t, m.Data)
+		select {
+		case seen <- seenConnectOptions{jwt: opts.JWT, password: opts.Password}:
+		default:
+		}
+		if opts.JWT != defaultSentinel || opts.Password != opaquePassword {
+			m.Respond(nil)
+			return
+		}
+		ujwt := createAuthUser(t, user, "mqtt", tpub, "", tkp, 10*time.Minute, nil)
+		m.Respond(serviceResponse(t, user, si.ID, ujwt, "", 0))
+	}
+
+	at := NewAuthTest(t, conf, handler, nats.UserCredentials(creds))
+	defer at.Cleanup()
+
+	mc, rc := authCalloutMQTTConnect(t, at.srv.getOpts().MQTT.Host, at.srv.getOpts().MQTT.Port, "mqtt-auth-callout", "ignored", opaquePassword)
+	defer mc.Close()
+
+	got := require_ChanRead(t, seen, 2*time.Second)
+	require_Equal(t, got.jwt, defaultSentinel)
+	require_Equal(t, got.password, opaquePassword)
+	require_Equal(t, rc, mqttConnAckRCConnectionAccepted)
 }

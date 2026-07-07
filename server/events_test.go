@@ -1238,7 +1238,7 @@ func TestAccountReqMonitoring(t *testing.T) {
 	s.EnableJetStream(&JetStreamConfig{StoreDir: t.TempDir()})
 	unusedAcc, _ := createAccount(s)
 	acc, akp := createAccount(s)
-	acc.EnableJetStream(nil)
+	acc.EnableJetStream(nil, nil)
 	subsz := fmt.Sprintf(accDirectReqSubj, acc.Name, "SUBSZ")
 	connz := fmt.Sprintf(accDirectReqSubj, acc.Name, "CONNZ")
 	jsz := fmt.Sprintf(accDirectReqSubj, acc.Name, "JSZ")
@@ -1885,6 +1885,19 @@ func TestServerEventsStatsZ(t *testing.T) {
 	if m.Stats.Received.Msgs < 1 {
 		t.Fatalf("Did not match received msgs of >=1, got %d", m.Stats.Received.Msgs)
 	}
+	if m.Stats.ReceivedFromClients.Msgs < 1 {
+		t.Fatalf("Did not match received from client msgs of >=1, got %d", m.Stats.ReceivedFromClients.Msgs)
+	}
+	if m.Stats.ReceivedFromClients.Bytes < 1 {
+		t.Fatalf("Did not match received from client bytes of >=1, got %d", m.Stats.ReceivedFromClients.Bytes)
+	}
+	if m.Stats.SentToClients.Msgs < 1 {
+		t.Fatalf("Did not match sent to client msgs of >= 1, got %d", m.Stats.SentToClients.Msgs)
+	}
+	if m.Stats.SentToClients.Bytes < 1 {
+		t.Fatalf("Did not match sent to client bytes of >= 1, got %d", m.Stats.SentToClients.Bytes)
+	}
+
 	// Default pool size + 1 for system account
 	expectedRoutes := DEFAULT_ROUTE_POOL_SIZE + 1
 	if lr := len(m.Stats.Routes); lr != expectedRoutes {
@@ -1951,6 +1964,8 @@ func TestServerEventsStatsZ(t *testing.T) {
 			t.Fatalf("Expected server A's route to B to have Name set to %q, got %q", "B", sr.Name)
 		}
 	}
+	// Increment stalls to confirm they are reported.
+	atomic.AddInt64(&sb.stalls, 3)
 
 	// Now query B and check that route's name is "A"
 	subj = fmt.Sprintf(serverStatsReqSubj, sb.ID())
@@ -1971,6 +1986,70 @@ func TestServerEventsStatsZ(t *testing.T) {
 			t.Fatalf("Expected server B's route to A to have Name set to %q, got %q", "A_SRV", sr.Name)
 		}
 	}
+	require_Equal(t, m.Stats.StalledClients, 3)
+}
+
+func TestServerEventsStatsZForcedBroadcastNotRateLimited(t *testing.T) {
+	// Tests will set this generally faster, but here we want the rate limiter
+	// to actually be active.
+	original := statszRateLimit
+	statszRateLimit = time.Hour
+	defer func() { statszRateLimit = original }()
+
+	s, opts := runTrustedServer(t)
+	defer s.Shutdown()
+
+	acc, akp := createAccount(s)
+	require_NoError(t, s.setSystemAccount(acc))
+
+	url := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
+	nc, err := nats.Connect(url, createUserCreds(t, s, akp))
+	require_NoError(t, err)
+	defer nc.Close()
+
+	subj := fmt.Sprintf(serverStatsSubj, s.ID())
+
+	// Arrange so that the rate limiter would suppress any broadcast:
+	// stop the periodic heartbeat timer so it cannot produce a broadcast,
+	// and set lastStatsz to "now" so we are well within the interval.
+	s.mu.Lock()
+	if s.sys.stmr != nil {
+		s.sys.stmr.Stop()
+	}
+	s.sys.cstatsz = time.Hour
+	s.sys.statsz = time.Hour
+	s.sys.lastStatsz = time.Now()
+	s.mu.Unlock()
+
+	// Let any inflight startup statsz goroutines finish before we subscribe,
+	// so they cannot land in our subscription as a false positive.
+	time.Sleep(300 * time.Millisecond)
+
+	// From here on the only thing that can publish to this subject is an
+	// un-suppressed broadcast.
+	sub, err := nc.SubscribeSync(subj)
+	require_NoError(t, err)
+	defer sub.Unsubscribe()
+	require_NoError(t, nc.Flush())
+
+	// Re-arm the suppression window right before the request.
+	s.mu.Lock()
+	s.sys.lastStatsz = time.Now()
+	s.mu.Unlock()
+
+	// Issue a forced (no-reply) STATSZ request. This is the path a new meta
+	// leader uses to force an immediate broadcast. It must reset lastStatsz
+	// and broadcast immediately even though we are within the rate-limit
+	// interval.
+	s.statszReq(nil, nil, nil, subj, _EMPTY_, nil, nil)
+
+	// Make sure it is a statsz from our server.
+	msg, err := sub.NextMsg(2 * time.Second)
+	require_NoError(t, err)
+	var m ServerStatsMsg
+	require_NoError(t, json.Unmarshal(msg.Data, &m))
+	require_Equal(t, m.Server.ID, s.ID())
+	require_Equal(t, m.Stats.Connections, 1)
 }
 
 func TestServerEventsHealthZSingleServer(t *testing.T) {
@@ -3348,6 +3427,86 @@ func TestServerEventsFilteredByTag(t *testing.T) {
 	require_Len(t, len(msgs), 0)
 }
 
+func TestServerUnstableEventFilterMatch(t *testing.T) {
+	confA := createConfFile(t, []byte(`
+		listen: -1
+		server_name: srv1
+		server_tags: ["foo", "bar"]
+		cluster {
+			name: clust
+			listen: -1
+			no_advertise: true
+		}
+		system_account: SYS
+		accounts: {
+			SYS: {
+				users: [
+					{user: b, password: b}
+				]
+			}
+		}
+		no_auth_user: b
+    `))
+	sA, _ := RunServerWithConfig(confA)
+	defer sA.Shutdown()
+	confB := createConfFile(t, []byte(fmt.Sprintf(`
+		listen: -1
+		server_name: srv10
+		server_tags: ["bar", "baz"]
+		cluster {
+			name: clust
+			listen: -1
+			no_advertise: true
+			routes [
+				nats-route://127.0.0.1:%d
+			]
+		}
+		system_account: SYS
+		accounts: {
+			SYS: {
+				users: [
+					{user: b, password: b}
+				]
+			}
+		}
+		no_auth_user: b
+    `, sA.opts.Cluster.Port)))
+	sB, _ := RunServerWithConfig(confB)
+	defer sB.Shutdown()
+	checkClusterFormed(t, sA, sB)
+
+	tester := func(t *testing.T, nc *nats.Conn, name string, count int) {
+		t.Helper()
+
+		r, err := json.Marshal(VarzEventOptions{EventFilterOptions: EventFilterOptions{Name: name, ExactMatch: true}})
+		require_NoError(t, err)
+
+		for i := 0; i < count; i++ {
+			res, err := nc.Request(fmt.Sprintf(serverPingReqSubj, "VARZ"), r, time.Second)
+			require_NoError(t, err)
+
+			var vz ServerAPIVarzResponse
+			err = json.Unmarshal(res.Data, &vz)
+			require_NoError(t, err)
+
+			if vz.Server.Name != name {
+				t.Fatalf("Expected server name to be %q, got %q", name, vz.Server.Name)
+			}
+		}
+	}
+
+	// Connects to srv1 so it's most likely to respond first while we are asking srv10 to respond.
+	nc := natsConnect(t, sA.ClientURL())
+	defer nc.Close()
+	tester(t, nc, "srv10", 10)
+
+	// Connects to srv10 so it's most likely to respond first while we are asking srv1 to respond.
+	nc.Close()
+	nc = natsConnect(t, sB.ClientURL())
+	defer nc.Close()
+	tester(t, nc, "srv1", 10)
+}
+
 // https://github.com/nats-io/nats-server/issues/3177
 func TestServerEventsAndDQSubscribers(t *testing.T) {
 	c := createJetStreamClusterWithTemplate(t, jsClusterAccountsTempl, "DDQ", 3)
@@ -3764,6 +3923,93 @@ func TestServerEventsPingStatsSlowConsumersStats(t *testing.T) {
 	}
 }
 
+func TestServerEventsPingStatsStaleConnectionStats(t *testing.T) {
+	templ := `
+                        listen: "127.0.0.1:-1"
+                        system_account = sys
+                        accounts {
+                          a {
+                            users = [{ user: a,  pass: a  }]
+                          }
+                          b {
+                            users = [{ user: b,  pass: b  }]
+                          }
+                          sys {
+                            users = [{ user: sys, pass: sys }]
+                          }
+                        }
+                        `
+	conf := createConfFile(t, []byte(templ))
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	// 3 different ways to get statz:
+	const statsz = "STATSZ"
+
+	// $SYS.REQ.SERVER.NCBT6MBA7Q7ZF4R4WVXTSZTCZDPPXX2ALLN3XM75VCBCNMPIKQFPFLKV.STATSZ
+	dirReqSubject := func(s *Server) string {
+		return fmt.Sprintf(serverDirectReqSubj, s.ID(), statsz)
+	}
+	// $SYS.REQ.SERVER.PING.STATSZ
+	pingReqSubject := func(s *Server) string {
+		return fmt.Sprintf(serverPingReqSubj, statsz)
+	}
+	// $SYS.REQ.SERVER.PING
+	statsPingSubject := func(s *Server) string {
+		return serverStatsPingReqSubj
+	}
+	subjects := []string{dirReqSubject(s), pingReqSubject(s), statsPingSubject(s)}
+
+	ncs, err := nats.Connect(s.ClientURL(), nats.UserInfo("sys", "sys"))
+	require_NoError(t, err)
+
+	for _, subject := range subjects {
+		msg, err := ncs.Request(subject, nil, time.Second)
+		require_NoError(t, err)
+
+		var ssm ServerStatsMsg
+		err = json.Unmarshal(msg.Data, &ssm)
+		require_NoError(t, err)
+
+		// No stale connection stats.
+		require_True(t, ssm.Stats.StaleConnectionStats == nil)
+		require_Equal(t, s.NumStaleConnections(), int64(0))
+		require_Equal(t, s.NumStaleConnectionsClients(), uint64(0))
+		require_Equal(t, s.NumStaleConnectionsRoutes(), uint64(0))
+		require_Equal(t, s.NumStaleConnectionsGateways(), uint64(0))
+		require_Equal(t, s.NumStaleConnectionsLeafs(), uint64(0))
+	}
+
+	// Set some values and confirm.
+	s.staleStats.clients.Store(1)
+	s.staleStats.routes.Store(2)
+	s.staleStats.gateways.Store(3)
+	s.staleStats.leafs.Store(4)
+	atomic.StoreInt64(&s.staleConnections, 10)
+	require_Equal(t, s.NumStaleConnections(), int64(10))
+	require_Equal(t, s.NumStaleConnectionsClients(), uint64(1))
+	require_Equal(t, s.NumStaleConnectionsRoutes(), uint64(2))
+	require_Equal(t, s.NumStaleConnectionsGateways(), uint64(3))
+	require_Equal(t, s.NumStaleConnectionsLeafs(), uint64(4))
+
+	for _, subject := range subjects {
+		msg, err := ncs.Request(subject, nil, time.Second)
+		require_NoError(t, err)
+
+		ssm := ServerStatsMsg{}
+		err = json.Unmarshal(msg.Data, &ssm)
+		require_NoError(t, err)
+
+		require_NotNil(t, ssm.Stats.StaleConnectionStats)
+		stcs := ssm.Stats.StaleConnectionStats
+		require_Equal(t, stcs.Clients, 1)
+		require_Equal(t, stcs.Routes, 2)
+		require_Equal(t, stcs.Gateways, 3)
+		require_Equal(t, stcs.Leafs, 4)
+		require_Equal(t, ssm.Stats.StaleConnections, int64(10))
+	}
+}
+
 func TestServerEventsStatszMaxProcsMemLimit(t *testing.T) {
 	// We want to prove that our set values are reflected in STATSZ,
 	// so we can't use constants that might match the system that
@@ -3882,10 +4128,13 @@ func TestServerEventsConnectDisconnectForGlobalAcc(t *testing.T) {
 	require_NoError(t, err)
 	defer ncs.Close()
 
-	s1, err := ncs.SubscribeSync(fmt.Sprintf(connectEventSubj, "*"))
+	s1, err := ncs.SubscribeSync(fmt.Sprintf(connectEventSubj, globalAccountName))
 	require_NoError(t, err)
-	s2, err := ncs.SubscribeSync(fmt.Sprintf(disconnectEventSubj, "*"))
+	s2, err := ncs.SubscribeSync(fmt.Sprintf(disconnectEventSubj, globalAccountName))
 	require_NoError(t, err)
+
+	// Flush to make sure subscriptions are established
+	require_NoError(t, ncs.Flush())
 
 	// Connect to global account
 	ncg, err := nats.Connect(url, nats.UserInfo("", ""))
@@ -3903,4 +4152,142 @@ func TestServerEventsConnectDisconnectForGlobalAcc(t *testing.T) {
 	msg, err = s2.NextMsg(5 * time.Second)
 	require_NoError(t, err)
 	require_Equal(t, msg.Subject, fmt.Sprintf(disconnectEventSubj, globalAccountName))
+}
+
+func TestSendInternalAccountMsgWithReplyDoesNotMutateHeaderSlice(t *testing.T) {
+	s := RunServer(DefaultOptions())
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(s.ClientURL())
+	require_NoError(t, err)
+	defer nc.Close()
+
+	sub, err := nc.SubscribeSync("foo")
+	require_NoError(t, err)
+	require_NoError(t, nc.Flush())
+
+	// Build a header slice with significant spare capacity, like callers
+	// constructing headers with append/genHeader naturally do.
+	hdr := make([]byte, 0, 256)
+	hdr = append(hdr, "NATS/1.0\r\nFoo: bar\r\n\r\n"...)
+
+	// Snapshot the entire backing array so we can detect any mutation,
+	// including writes past len(hdr) into spare capacity.
+	snapshot := make([]byte, cap(hdr))
+	copy(snapshot, hdr[:cap(hdr)])
+
+	body := []byte("REPRO_LEAK_BODY")
+	err = s.sendInternalAccountMsgWithReply(s.globalAccount(), "foo", _EMPTY_, hdr, body, false)
+	require_NoError(t, err)
+
+	msg, err := sub.NextMsg(2 * time.Second)
+	require_NoError(t, err)
+	require_Equal(t, string(msg.Data), "REPRO_LEAK_BODY")
+	require_Equal(t, msg.Header.Get("Foo"), "bar")
+
+	// The caller's hdr slice (and its full backing array) must be untouched.
+	got := hdr[:cap(hdr)]
+	if !bytes.Equal(got, snapshot) {
+		t.Fatalf("hdr backing array was mutated by send:\n want: %q\n  got: %q", snapshot, got)
+	}
+}
+
+func TestEventsResetChSendNoPanicAfterShutdownEventing(t *testing.T) {
+	s := RunServer(DefaultOptions())
+	defer s.Shutdown()
+
+	// Simulate a sender that grabbed the channel reference before it was nil-ed,
+	// exactly as the production senders do under s.mu.
+	s.mu.Lock()
+	if s.sys == nil || s.sys.resetCh == nil {
+		s.mu.Unlock()
+		t.Fatal("expected system eventing to be running")
+	}
+	rc := s.sys.resetCh
+	s.mu.Unlock()
+
+	// Drive eventing shutdown to completion. With the old code this closed rc.
+	s.shutdownEventing()
+
+	// Stand in for the (now exited) internal send loop so that, on a healthy
+	// open channel, the send can complete.
+	go func() { <-rc }()
+
+	// Perform the send using the same select-against-quitCh pattern as the
+	// production senders. On the buggy code rc is closed and this panics.
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		select {
+		case rc <- struct{}{}:
+		case <-s.quitCh:
+		}
+	}()
+
+	select {
+	case r := <-done:
+		if r != nil {
+			t.Fatalf("send on resetCh panicked during shutdown: %v", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("send on resetCh blocked unexpectedly")
+	}
+}
+
+func TestEventsRemoteLatencyUpdateNilLatency(t *testing.T) {
+	s, _ := runTrustedServer(t)
+	defer s.Shutdown()
+
+	// Enable internal events by setting a system account.
+	sacc, _ := createAccount(s)
+	require_NoError(t, s.setSystemAccount(sacc))
+
+	// Target account that will own the tracked response serviceImport.
+	acc, _ := createAccount(s)
+
+	// Construct the offending state directly: a response serviceImport with a
+	// .T-suffixed tracked reply, tracking enabled, but a nil latency.
+	reply := "_R_.abcdef.T"
+	si := &serviceImport{
+		acc:      acc,
+		from:     reply,
+		to:       reply,
+		response: true,
+		tracking: true, // tracking on, but...
+		latency:  nil,  // ...no latency object -> nil deref at si.latency.subject
+	}
+	acc.mu.Lock()
+	if acc.exports.responses == nil {
+		acc.exports.responses = make(map[string]*serviceImport)
+	}
+	acc.exports.responses[reply] = si
+	acc.mu.Unlock()
+
+	// Craft a remote latency measurement that resolves to this serviceImport.
+	rl := remoteLatency{
+		Account: acc.Name,
+		ReqId:   reply,
+	}
+	msg, err := json.Marshal(&rl)
+	require_NoError(t, err)
+
+	// On unfixed code this panics with a nil pointer dereference on
+	// si.latency.subject. With the fix it returns cleanly.
+	var recovered any
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = r
+				// The panic occurred while holding acc.mu.RLock() (taken just
+				// before the offending deref and released just after). Release
+				// it so the deferred s.Shutdown does not deadlock.
+				acc.mu.RUnlock()
+			}
+		}()
+		s.remoteLatencyUpdate(nil, nil, nil, "$SYS.LATENCY.M2."+reply, "", nil, msg)
+	}()
+
+	if recovered != nil {
+		t.Fatalf("remoteLatencyUpdate panicked on nil si.latency: %v", recovered)
+	}
 }

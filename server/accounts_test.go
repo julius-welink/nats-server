@@ -3563,9 +3563,14 @@ func TestAccountMaxConnectionsDisconnectsNewestFirst(t *testing.T) {
 	disconnects := make([]chan error, 0)
 	for i := 1; i <= 3; i++ {
 		disconnectCh := make(chan error)
-		c, err := nats.Connect(s.ClientURL(), nats.UserInfo(fmt.Sprintf("user%d", i), "foo"), nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			disconnectCh <- err
-		}))
+		c, err := nats.Connect(
+			s.ClientURL(),
+			nats.UserInfo(fmt.Sprintf("user%d", i), "foo"),
+			nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+				disconnectCh <- err
+			}),
+			nats.NoReconnect(),
+		)
 		require_NoError(t, err)
 		defer c.Close()
 		conns = append(conns, c)
@@ -3684,6 +3689,73 @@ func TestAccountUpdateRemoteServerDisconnectsNewestFirst(t *testing.T) {
 	require_False(t, disconnected[byStartTime[0].cid])
 	require_True(t, disconnected[byStartTime[1].cid])
 	require_True(t, disconnected[byStartTime[2].cid])
+}
+
+func TestAccountMaxConnectionsDuringLameDuckMode(t *testing.T) {
+	cf := createConfFile(t, []byte(`
+        port: -1
+        accounts {
+                TEST {
+                        users = [
+                          {user: user, password: user}
+                        ]
+                        limits {
+                                max_connections: 3
+                        }
+                }
+        }
+		cluster {
+		  listen: 127.0.0.1:7248
+		  name: "abc"
+		}
+		no_auth_user: user
+		lame_duck_grace_period: 1s
+        `))
+
+	optsA, err := ProcessConfigFile(cf)
+	require_NoError(t, err)
+	optsA.NoSigs, optsA.NoLog = true, true
+	optsA.ServerName = "A"
+	srvA := RunServer(optsA)
+	defer srvA.Shutdown()
+	optsB := nextServerOpts(optsA)
+	optsB.Routes = RoutesFromStr(fmt.Sprintf("nats://%s:%d", optsA.Cluster.Host, optsA.Cluster.Port))
+	optsB.ServerName = "B"
+	srvB := RunServer(optsB)
+	defer srvB.Shutdown()
+
+	checkClusterFormed(t, srvA, srvB)
+
+	disconnects := make([]chan error, 0)
+	for range 3 {
+		disconnectCh := make(chan error)
+		c, err := nats.Connect(
+			srvA.ClientURL(),
+			nats.UserInfo("user", "user"),
+			nats.DisconnectErrHandler(func(c *nats.Conn, err error) {
+				disconnectCh <- err
+			}),
+		)
+		require_NoError(t, err)
+		defer c.Close()
+		disconnects = append(disconnects, disconnectCh)
+		// Small delay to ensure distinct start times.
+		time.Sleep(10 * time.Millisecond)
+	}
+	acc, err := srvA.lookupAccount("TEST")
+	require_NoError(t, err)
+	require_Equal(t, acc.NumConnections(), 3)
+
+	go srvA.LameDuckShutdown()
+
+	for _, disconnectCh := range disconnects {
+		select {
+		case err := <-disconnectCh:
+			require_Equal(t, err.Error(), "EOF")
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected LDM reconnect")
+		}
+	}
 }
 
 func TestAccountUserSubPermsWithQueueGroups(t *testing.T) {
@@ -4028,4 +4100,272 @@ func TestAccountServiceImportNoResponders(t *testing.T) {
 
 	_, err := nc.Request("foo", []byte("request"), 250*time.Millisecond)
 	require_Error(t, err, nats.ErrNoResponders)
+}
+
+// Test that service import replies are delivered when the requester's reply inbox
+// is subscribed on a different cluster node.
+func TestAccountServiceImportReplyDroppedAcrossClusterRoutes(t *testing.T) {
+	tmpl := `
+		server_name: %s
+		listen: 127.0.0.1:-1
+		cluster {
+			name: test
+			listen: 127.0.0.1:-1
+			%s
+		}
+		accounts {
+			A {
+				users = [{ user: a, password: a }]
+				imports = [{ service: { account: B, subject: svc } }]
+			}
+			B {
+				users = [{ user: b, password: b }]
+				exports = [{ service: svc, accounts: [A] }]
+			}
+		}
+	`
+	confA := createConfFile(t, []byte(fmt.Sprintf(tmpl, "node-A", "")))
+	srvA, optsA := RunServerWithConfig(confA)
+	defer srvA.Shutdown()
+
+	confB := createConfFile(t, []byte(fmt.Sprintf(tmpl, "node-B",
+		fmt.Sprintf(`routes = ["nats-route://127.0.0.1:%d"]`, optsA.Cluster.Port))))
+	srvB, _ := RunServerWithConfig(confB)
+	defer srvB.Shutdown()
+
+	checkClusterFormed(t, srvA, srvB)
+
+	// Responder on node-A, account B.
+	ncB := natsConnect(t, srvA.ClientURL(), nats.UserInfo("b", "b"))
+	defer ncB.Close()
+	natsSub(t, ncB, "svc", func(m *nats.Msg) { m.Respond([]byte("pong")) })
+	natsFlush(t, ncB)
+
+	// Wait for B's "svc" sub to propagate to node-B so it can route the request.
+	checkSubInterest(t, srvB, "B", "svc", time.Second)
+
+	// Subscriber on node-A, account A: explicit reply inbox.
+	// This subscription will be a ROUTE sub on node-B once it propagates.
+	ncSub := natsConnect(t, srvA.ClientURL(), nats.UserInfo("a", "a"))
+	defer ncSub.Close()
+	inbox := "_INBOX.xroute.reply"
+	replyCh := make(chan *nats.Msg, 1)
+	_, err := ncSub.Subscribe(inbox, func(m *nats.Msg) { replyCh <- m })
+	require_NoError(t, err)
+	natsFlush(t, ncSub)
+
+	// Wait for the inbox to appear as a ROUTE sub on node-B.
+	checkSubInterest(t, srvB, "A", inbox, time.Second)
+
+	// Publisher on node-B, account A: publish with explicit cross-node reply.
+	// The response service import on node-B receives the reply via route
+	// (c.kind==ROUTER) and must forward it back to the ROUTE sub for the inbox.
+	ncPub := natsConnect(t, srvB.ClientURL(), nats.UserInfo("a", "a"))
+	defer ncPub.Close()
+	err = ncPub.PublishMsg(&nats.Msg{Subject: "svc", Reply: inbox, Data: []byte("ping")})
+	require_NoError(t, err)
+
+	select {
+	case msg := <-replyCh:
+		require_Equal(t, string(msg.Data), "pong")
+	case <-time.After(3 * time.Second):
+		t.Fatal("reply not received — service import reply was dropped across cluster routes")
+	}
+
+	// Reverse: subscribe on node-B, publish from node-A.
+	ncSub2 := natsConnect(t, srvB.ClientURL(), nats.UserInfo("a", "a"))
+	defer ncSub2.Close()
+	inbox2 := "_INBOX.xroute.reply2"
+	replyCh2 := make(chan *nats.Msg, 1)
+	_, err = ncSub2.Subscribe(inbox2, func(m *nats.Msg) { replyCh2 <- m })
+	require_NoError(t, err)
+	natsFlush(t, ncSub2)
+	checkSubInterest(t, srvA, "A", inbox2, time.Second)
+
+	err = ncSub.PublishMsg(&nats.Msg{Subject: "svc", Reply: inbox2, Data: []byte("ping")})
+	require_NoError(t, err)
+
+	select {
+	case msg := <-replyCh2:
+		require_Equal(t, string(msg.Data), "pong")
+	case <-time.After(3 * time.Second):
+		t.Fatal("reverse reply not received — service import reply was dropped across cluster routes")
+	}
+}
+
+func TestStreamActivationExpiredNoMatchDoesNotInvalidate(t *testing.T) {
+	// Account performing the import.
+	a := NewAccount("importer")
+	// The account we will pass as the (non-matching) export account.
+	exportAcc := NewAccount("exporter")
+	// A different, still-valid stream import that does NOT match the
+	// (exportAcc, subject) pair passed to streamActivationExpired.
+	otherAcc := NewAccount("other")
+	si := &streamImport{
+		acc:  otherAcc,
+		from: "other.subject",
+		// claim is nil, so checkActivation would return false and the
+		// buggy code would wrongly mark this import invalid.
+		claim: nil,
+	}
+	a.imports.streams = []*streamImport{si}
+
+	// No matching import.
+	a.streamActivationExpired(exportAcc, "nomatch.subject")
+	if si.invalid {
+		t.Fatalf("unrelated stream import was wrongly invalidated on no match")
+	}
+}
+
+func TestRemoveAllServiceImportSubsNoRaceUnderConcurrentReaders(t *testing.T) {
+	for range 2000 {
+		a := &Account{}
+		a.imports.services = make(map[string][]*serviceImport)
+		for i := 0; i < 8; i++ {
+			si := &serviceImport{sid: []byte("sid")}
+			a.imports.services[fmt.Sprintf("svc.%d", i)] = []*serviceImport{si}
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// Reader: mimics updateAccountClaimsWithRefresh reading a.ic and
+		// iterating si.sid under a read lock.
+		go func() {
+			defer wg.Done()
+			a.mu.RLock()
+			_ = a.ic
+			for _, sis := range a.imports.services {
+				for _, si := range sis {
+					_ = si.sid
+				}
+			}
+			a.mu.RUnlock()
+		}()
+
+		// Writer: nils si.sid and a.ic. a.ic is nil so the post-unlock
+		// path returns early and does not touch a real client.
+		go func() {
+			defer wg.Done()
+			a.removeAllServiceImportSubs()
+		}()
+
+		wg.Wait()
+	}
+}
+
+func TestAccountDefaultPermsRaceDuringAuth(t *testing.T) {
+	acc := NewAccount("foo")
+
+	// User claims with no permissions so buildInternalNkeyUser hits the
+	// acc.defaultPerms read path (p == nil).
+	uc := jwt.NewUserClaims("U" + strings.Repeat("A", 51))
+
+	var someClaims jwt.Permissions
+	someClaims.Pub.Allow.Add("foo")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Reader: mimics authentication path.
+	go func() {
+		defer wg.Done()
+		for range 1000 {
+			_ = buildInternalNkeyUser(uc, nil, acc)
+		}
+	}()
+
+	// Writer: mimics updateAccountClaimsWithRefresh refreshing defaultPerms.
+	go func() {
+		defer wg.Done()
+		for range 1000 {
+			acc.mu.Lock()
+			acc.defaultPerms = buildPermissionsFromJwt(&someClaims)
+			acc.mu.Unlock()
+		}
+	}()
+
+	wg.Wait()
+}
+
+// Must be run with -race.
+func TestAccountRemoveCbJSWriteRace(t *testing.T) {
+	opts := DefaultTestOptions
+	opts.Port = -1
+	opts.JetStream = true
+	opts.StoreDir = t.TempDir()
+	s := RunServer(&opts)
+	defer s.Shutdown()
+
+	for i := range 50 {
+		name := fmt.Sprintf("ACC_%d", i)
+		acc, _ := s.LookupOrRegisterAccount(name)
+		require_NoError(t, acc.EnableJetStream(nil, nil))
+		// Confirm a.js is set, so removeCb will reach the `a.js = nil` write.
+		if !acc.JetStreamEnabled() {
+			t.Fatalf("expected JetStream enabled (a.js != nil) for %s", name)
+		}
+
+		var stop atomic.Bool
+		done := make(chan struct{})
+		// Reader: read a.js under a.mu.RLock, exactly like maxBytesLimits does.
+		go func(a *Account) {
+			defer close(done)
+			for !stop.Load() {
+				a.mu.RLock()
+				_ = a.js
+				a.mu.RUnlock()
+			}
+		}(acc)
+
+		// Writer: removeCb sets `a.js = nil`, which must synchronize with the
+		// locked read above.
+		removeCb(s, name)
+
+		stop.Store(true)
+		<-done
+	}
+}
+
+// Must be run with -race.
+func TestAccountSendTrackingLatencyRcRace(t *testing.T) {
+	a := NewAccount("A")
+	rc := &client{kind: CLIENT}
+	responder := &client{kind: SYSTEM}
+
+	si := &serviceImport{
+		acc:      a,
+		rc:       rc,
+		share:    false,
+		ts:       time.Now().UnixNano(),
+		tracking: true,
+		latency:  &serviceLatency{subject: "latency.subj"},
+	}
+
+	const iters = 1000
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Reader goroutine: exercises the unlocked re-read of si.rc.
+	go func() {
+		defer wg.Done()
+		for range iters {
+			a.sendTrackingLatency(si, responder)
+			a.mu.Lock()
+			si.m1 = nil
+			a.mu.Unlock()
+		}
+	}()
+
+	// Writer goroutine: mimics sendLatencyResult writing si.rc under a.mu.Lock.
+	go func() {
+		defer wg.Done()
+		for range iters {
+			a.mu.Lock()
+			si.rc = rc
+			a.mu.Unlock()
+		}
+	}()
+
+	wg.Wait()
 }

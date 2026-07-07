@@ -719,8 +719,17 @@ func TestJetStreamJWTClusteredDeleteTierWithStreamAndMove(t *testing.T) {
 	_, err = js.AddStream(cfg)
 	require_NoError(t, err)
 
+	sl := c.streamLeader(aExpPub, "testR1-1")
+	require_NotNil(t, sl)
+	acc, err := sl.lookupAccount(aExpPub)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("testR1-1")
+	require_NoError(t, err)
+	require_Equal(t, mset.lastSeq(), 0)
+
 	_, err = js.Publish("testR1-1", nil)
 	require_NoError(t, err)
+	require_Equal(t, mset.lastSeq(), 1)
 
 	time.Sleep(time.Second - time.Since(start)) // make sure the time stamp changes
 	delete(accClaim.Limits.JetStreamTieredLimits, "R1")
@@ -739,6 +748,7 @@ func TestJetStreamJWTClusteredDeleteTierWithStreamAndMove(t *testing.T) {
 	_, err = js.Publish("testR1-1", nil)
 	require_Error(t, err)
 	require_Equal(t, err.Error(), "nats: no JetStream default or applicable tiered limit present")
+	require_Equal(t, mset.lastSeq(), 1)
 
 	cfg.Replicas = 3
 	_, err = js.UpdateStream(cfg)
@@ -1698,12 +1708,13 @@ func TestJetStreamJWTClusterAccountNRG(t *testing.T) {
 	_, syspub := createKey(t)
 	sysJwt := encodeClaim(t, jwt.NewAccountClaims(syspub), syspub)
 
-	_, aExpPub := createKey(t)
+	aExpKp, aExpPub := createKey(t)
 	accClaim := jwt.NewAccountClaims(aExpPub)
 	accClaim.Name = "acc"
 	accClaim.Limits.JetStreamTieredLimits["R1"] = jwt.JetStreamLimits{DiskStorage: 1100, Consumer: 10, Streams: 1}
 	accClaim.Limits.JetStreamTieredLimits["R3"] = jwt.JetStreamLimits{DiskStorage: 1100, Consumer: 1, Streams: 1}
 	accJwt := encodeClaim(t, accClaim, aExpPub)
+	accCreds := newUser(t, aExpKp)
 
 	_, aExpPub2 := createKey(t)
 	accClaim2 := jwt.NewAccountClaims(aExpPub2)
@@ -1735,6 +1746,13 @@ func TestJetStreamJWTClusterAccountNRG(t *testing.T) {
 
 	c := createJetStreamClusterWithTemplate(t, tmlp, "cluster", 3)
 	defer c.shutdown()
+
+	nc, _ := jsClientConnect(t, c.randomServer(), nats.UserCredentials(accCreds))
+	jsStreamCreate(t, nc, &StreamConfig{
+		Name:     "TEST",
+		Replicas: 3,
+		Storage:  FileStorage,
+	})
 
 	// We'll try flipping the state a few times and then do some sanity
 	// checks to check that it took effect.
@@ -1782,21 +1800,143 @@ func TestJetStreamJWTClusterAccountNRG(t *testing.T) {
 			}
 			s.rnMu.Unlock()
 
+			// The Raft nodes move to the new traffic account asynchronously,
+			// once statsz has propagated every peer's account-NRG capability,
+			// so wait for them to converge before checking.
+			checkFor(t, 2*time.Second, 200*time.Millisecond, func() error {
+				for _, rg := range raftNodes {
+					rg.Lock()
+					rgAcc := rg.t.Account()
+					rg.Unlock()
+					want := syspub
+					if state == "owner" {
+						want = aExpPub
+					} else if state == thirdAcc {
+						want = aExpPub2
+					}
+					if rgAcc.Name != want {
+						return fmt.Errorf("group %q: traffic account is %q, want %q", rg.group, rgAcc.Name, want)
+					}
+				}
+				return nil
+			})
+
+			// Get the Raftz state also.
+			rz := s.Raftz(&RaftzOptions{AccountFilter: aExpPub})
+			require_NotNil(t, rz)
+			rza := (*rz)[aExpPub]
+			require_NotNil(t, rza)
+
 			// Check whether each of the Raft nodes reports being
 			// in-account or not.
 			for _, rg := range raftNodes {
 				rg.Lock()
-				rgAcc := rg.acc
+				rgAcc := rg.t.Account()
 				rg.Unlock()
 				switch state {
 				case "system":
 					require_Equal(t, rgAcc.Name, syspub)
+					require_Equal(t, rza[rg.group].SystemAcc, true)
+					require_Equal(t, rza[rg.group].TrafficAcc, syspub)
 				case "owner":
 					require_Equal(t, rgAcc.Name, aExpPub)
+					require_Equal(t, rza[rg.group].SystemAcc, false)
+					require_Equal(t, rza[rg.group].TrafficAcc, aExpPub)
 				case thirdAcc:
 					require_Equal(t, rgAcc.Name, aExpPub2)
+					require_Equal(t, rza[rg.group].SystemAcc, false)
+					require_Equal(t, rza[rg.group].TrafficAcc, aExpPub2)
 				}
 			}
+		}
+	}
+}
+
+func TestJetStreamJWTClusterAccountNRGPersistsAfterRestart(t *testing.T) {
+	_, syspub := createKey(t)
+	sysJwt := encodeClaim(t, jwt.NewAccountClaims(syspub), syspub)
+
+	aExpKp, aExpPub := createKey(t)
+	accClaim := jwt.NewAccountClaims(aExpPub)
+	accClaim.Name = "acc"
+	accClaim.ClusterTraffic = jwt.ClusterTrafficOwner
+	accClaim.Limits.JetStreamTieredLimits["R1"] = jwt.JetStreamLimits{DiskStorage: 1100, Consumer: 10, Streams: 1}
+	accClaim.Limits.JetStreamTieredLimits["R3"] = jwt.JetStreamLimits{DiskStorage: 1100, Consumer: 1, Streams: 1}
+	accJwt := encodeClaim(t, accClaim, aExpPub)
+	accCreds := newUser(t, aExpKp)
+
+	tmlp := `
+		listen: 127.0.0.1:-1
+		server_name: %s
+		jetstream: {max_mem_store: 256MB, max_file_store: 2GB, store_dir: '%s'}
+		leaf {
+			listen: 127.0.0.1:-1
+		}
+		cluster {
+			name: %s
+			listen: 127.0.0.1:%d
+			routes = [%s]
+		}
+	` + fmt.Sprintf(`
+		operator: %s
+		system_account: %s
+		resolver = MEMORY
+		resolver_preload = {
+			%s : %s
+			%s : %s
+		}
+	`, ojwt, syspub, syspub, sysJwt, aExpPub, accJwt)
+
+	c := createJetStreamClusterWithTemplate(t, tmlp, "cluster", 3)
+	defer c.shutdown()
+
+	nc, _ := jsClientConnect(t, c.randomServer(), nats.UserCredentials(accCreds))
+
+	// Prevent 'nats: JetStream not enabled for account' when creating the first stream.
+	c.waitOnAccount(aExpPub)
+
+	_, err := jsStreamCreate(t, nc, &StreamConfig{
+		Name:     "TEST",
+		Replicas: 3,
+		Storage:  FileStorage,
+	})
+	require_NoError(t, err)
+
+	// The account had cluster traffic set to "owner" already. Restarting servers should remember this setting.
+	for _, s := range c.servers {
+		acc, err := s.lookupAccount(aExpPub)
+		require_NoError(t, err)
+
+		// Check that everything looks like it should.
+		require_True(t, acc != nil)
+		require_True(t, acc.js != nil)
+		require_Equal(t, acc.nrgAccount, aExpPub)
+
+		// Now get a list of all the Raft nodes that should have the correct cluster traffic set.
+		s.rnMu.Lock()
+		raftNodes := make([]*raft, 0, len(s.raftNodes))
+		for _, n := range s.raftNodes {
+			rg := n.(*raft)
+			if rg.accName != acc.Name {
+				continue
+			}
+			raftNodes = append(raftNodes, rg)
+		}
+		s.rnMu.Unlock()
+
+		// Get the Raftz state also.
+		rz := s.Raftz(&RaftzOptions{AccountFilter: aExpPub})
+		require_NotNil(t, rz)
+		rza := (*rz)[aExpPub]
+		require_NotNil(t, rza)
+
+		for _, rg := range raftNodes {
+			rg.Lock()
+			rgAcc := rg.t.Account()
+			rg.Unlock()
+			require_Equal(t, rgAcc.Name, aExpPub)
+			require_Equal(t, rza[rg.group].SystemAcc, false)
+			require_Equal(t, rza[rg.group].TrafficAcc, aExpPub)
 		}
 	}
 }
@@ -1925,4 +2065,63 @@ func TestJetStreamJWTUpdateWithPreExistingStream(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func TestJetStreamAccountResolverNoFetchIfNotMember(t *testing.T) {
+	_, spub := createKey(t)
+	sysClaim := jwt.NewAccountClaims(spub)
+	sysClaim.Name = "SYS"
+	sysJwt := encodeClaim(t, sysClaim, spub)
+	kp, _ := nkeys.CreateAccount()
+	aPub, _ := kp.PublicKey()
+
+	templ := `
+	listen: 127.0.0.1:-1
+	server_name: %s
+	jetstream: {max_mem_store: 2GB, max_file_store: 2GB, store_dir: '%s'}
+
+	leaf {
+		listen: 127.0.0.1:-1
+	}
+
+	cluster {
+		name: %s
+		listen: 127.0.0.1:%d
+		routes = [%s]
+	}
+`
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			w.Write([]byte("ok"))
+		} else if strings.HasSuffix(r.URL.Path, spub) {
+			w.Write([]byte(sysJwt))
+		} else {
+			// Simulate some time being spent, but doesn't respond.
+			time.Sleep(250 * time.Millisecond)
+		}
+	}))
+	defer ts.Close()
+
+	c := createJetStreamClusterWithTemplateAndModHook(t, templ, "R3S", 3,
+		func(serverName, clusterName, storeDir, conf string) string {
+			return conf + fmt.Sprintf(`
+				operator: %s
+				system_account: %s
+				resolver: URL("%s")`, ojwt, spub, ts.URL)
+		})
+	defer c.shutdown()
+
+	s := c.leader()
+	js := s.getJetStream()
+	ci := &ClientInfo{Cluster: "R3S", Account: aPub}
+	cfg := &StreamConfig{Name: "TEST", Subjects: []string{"foo"}}
+	sa := &streamAssignment{Client: ci, Config: cfg}
+	start := time.Now()
+	// Simulate some meta operations where this server is not a member.
+	// The server should not fetch the account from the resolver.
+	for range 5 {
+		js.processStreamAssignment(sa)
+	}
+	require_LessThan(t, time.Since(start), 100*time.Millisecond)
 }

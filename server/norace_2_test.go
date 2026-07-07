@@ -456,7 +456,7 @@ func TestNoRaceFilestoreBinaryStreamSnapshotEncodingLargeGaps(t *testing.T) {
 	storeDir := t.TempDir()
 	fcfg := FileStoreConfig{
 		StoreDir:  storeDir,
-		BlockSize: 512, // Small on purpose to create alot of blks.
+		BlockSize: 512, // Small on purpose to create a lot of blks.
 	}
 	fs, err := newFileStore(fcfg, StreamConfig{Name: "zzz", Subjects: []string{"zzz"}, Storage: FileStorage})
 	require_NoError(t, err)
@@ -473,19 +473,22 @@ func TestNoRaceFilestoreBinaryStreamSnapshotEncodingLargeGaps(t *testing.T) {
 	}
 	fs.StoreMsg(subj, nil, msg, 0)
 
+	// The tombstones from above will only be cleaned up when syncing blocks.
+	fs.syncBlocks()
+
 	snap, err := fs.EncodedStreamState(0)
 	require_NoError(t, err)
-	require_True(t, len(snap) < 512)
+	require_LessThan(t, len(snap), 512)
 
 	// Now decode the snapshot.
 	ss, err := DecodeStreamState(snap)
 	require_NoError(t, err)
 
-	require_True(t, ss.FirstSeq == 1)
-	require_True(t, ss.LastSeq == 20_000)
-	require_True(t, ss.Msgs == 2)
-	require_True(t, len(ss.Deleted) <= 2)
-	require_True(t, ss.Deleted.NumDeleted() == 19_998)
+	require_Equal(t, ss.FirstSeq, 1)
+	require_Equal(t, ss.LastSeq, 20_000)
+	require_Equal(t, ss.Msgs, 2)
+	require_Equal(t, len(ss.Deleted), 1)
+	require_Equal(t, ss.Deleted.NumDeleted(), 19_998)
 }
 
 func TestNoRaceJetStreamClusterStreamSnapshotCatchup(t *testing.T) {
@@ -1370,6 +1373,12 @@ func TestNoRaceMemStoreCompactPerformance(t *testing.T) {
 }
 
 func TestNoRaceJetStreamSnapshotsWithSlowAckDontSlowConsumer(t *testing.T) {
+	// Test takes less time this way.
+	snapshotAckTimeout = 500 * time.Millisecond
+	t.Cleanup(func() {
+		snapshotAckTimeout = defaultSnapshotAckTimeout
+	})
+
 	s := RunBasicJetStreamServer(t)
 	defer s.Shutdown()
 
@@ -1426,7 +1435,7 @@ func TestNoRaceJetStreamSnapshotsWithSlowAckDontSlowConsumer(t *testing.T) {
 		require_Equal(t, msg.Header.Get("Description"), "No Flow Response")
 	case <-ech:
 		t.Fatalf("Got disconnected: %v", err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(snapshotAckTimeout * 2):
 		t.Fatalf("Should have received EOF with error status")
 	}
 }
@@ -2294,7 +2303,7 @@ func TestNoRaceJetStreamClusterMemoryStreamLastSequenceResetAfterRestart(t *test
 			require_NoError(t, err)
 			node := mset.raftNode()
 			require_NotNil(t, node)
-			node.InstallSnapshot(mset.stateSnapshot())
+			node.InstallSnapshot(mset.stateSnapshot(), false)
 		}
 	}
 
@@ -2460,7 +2469,7 @@ func TestNoRaceJetStreamClusterMirrorSkipSequencingBug(t *testing.T) {
 		si, err := js.StreamInfo("M")
 		require_NoError(t, err)
 		if si.State.Msgs != 500_000 {
-			return fmt.Errorf("Expected 1M msgs, got state: %+v", si.State)
+			return fmt.Errorf("Expected 500k msgs, got state: %+v", si.State)
 		}
 		return nil
 	})
@@ -2730,14 +2739,20 @@ func TestNoRaceJetStreamClusterCheckInterestStatePerformanceWQ(t *testing.T) {
 	// Was > 30 ms before fix for comparison, M2 macbook air.
 	require_LessThan(t, elapsed, 5*time.Millisecond)
 
-	// Make sure we set the chkflr correctly. The chkflr should be equal to asflr+1.
+	// Make sure we set the chkflr correctly.
+	// The chkflr should be equal to asflr+1 (unless the next message matching the filter is further ahead).
 	// Otherwise, if chkflr would be set higher a subsequent call to checkInterestState will be ineffective.
 	requireFloorsEqual := func(o *consumer) {
 		t.Helper()
 		require_True(t, o != nil)
 		o.mu.RLock()
 		defer o.mu.RUnlock()
-		require_Equal(t, o.chkflr, o.asflr+1)
+		_, seq, err := mset.store.LoadNextMsg(o.cfg.FilterSubject, false, o.asflr+1, nil)
+		if err == ErrStoreEOF {
+			seq++
+		}
+		require_True(t, o.asflr+1 <= seq)
+		require_Equal(t, o.chkflr, seq)
 	}
 
 	requireFloorsEqual(mset.lookupConsumer("A"))
@@ -2889,9 +2904,9 @@ func TestNoRaceJetStreamClusterLargeMetaSnapshotTiming(t *testing.T) {
 	n := js.getMetaGroup()
 	// Now let's see how long it takes to create a meta snapshot and how big it is.
 	start := time.Now()
-	snap, err := js.metaSnapshot()
+	snap, _, _, err := js.metaSnapshot()
 	require_NoError(t, err)
-	require_NoError(t, n.InstallSnapshot(snap))
+	require_NoError(t, n.InstallSnapshot(snap, false))
 	t.Logf("Took %v to snap meta with size of %v\n", time.Since(start), friendlyBytes(len(snap)))
 }
 
@@ -2910,22 +2925,37 @@ func TestNoRaceStoreReverseWalkWithDeletesPerf(t *testing.T) {
 	msg := []byte("Hello")
 
 	for _, store := range []StreamStore{fs, ms} {
-		store.StoreMsg("foo.A", nil, msg, 0)
+		_, _, err = store.StoreMsg("foo.A", nil, msg, 0)
+		require_NoError(t, err)
 		for i := 0; i < 1_000_000; i++ {
-			store.StoreMsg("foo.B", nil, msg, 0)
+			_, _, err = store.StoreMsg("foo.B", nil, msg, 0)
+			require_NoError(t, err)
 		}
-		store.StoreMsg("foo.C", nil, msg, 0)
+		_, _, err = store.StoreMsg("foo.C", nil, msg, 0)
+		require_NoError(t, err)
 
 		var ss StreamState
 		store.FastState(&ss)
 		require_Equal(t, ss.Msgs, 1_000_002)
 
 		// Create a bunch of interior deletes.
-		p, err := store.PurgeEx("foo.B", 1, 0)
+		p, err := store.PurgeEx("foo.B", 0, 0)
 		require_NoError(t, err)
 		require_Equal(t, p, 1_000_000)
 
+		// Preload the caches so this test only measures the reverse walk.
+		preloadCaches := func() {
+			if fs, ok := store.(*fileStore); ok {
+				fs.mu.Lock()
+				defer fs.mu.Unlock()
+				for _, mb := range fs.blks {
+					require_NoError(t, mb.loadMsgs())
+				}
+			}
+		}
+
 		// Now simulate a walk backwards as we currently do when searching for starting sequence numbers in sourced streams.
+		preloadCaches()
 		start := time.Now()
 		var smv StoreMsg
 		for seq := ss.LastSeq; seq > 0; seq-- {
@@ -2938,10 +2968,11 @@ func TestNoRaceStoreReverseWalkWithDeletesPerf(t *testing.T) {
 		elapsed := time.Since(start)
 
 		// Now use the optimized load prev.
+		preloadCaches()
 		seq, seen := ss.LastSeq, 0
 		start = time.Now()
 		for {
-			sm, err := store.LoadPrevMsg(seq, &smv)
+			sm, _, err := store.LoadPrevMsg(_EMPTY_, false, seq, &smv)
 			if err == ErrStoreEOF {
 				break
 			}
@@ -2954,10 +2985,10 @@ func TestNoRaceStoreReverseWalkWithDeletesPerf(t *testing.T) {
 
 		switch store.(type) {
 		case *memStore:
-			require_True(t, elapsedNew < elapsed)
+			require_LessThan(t, elapsedNew, elapsed)
 		case *fileStore:
-			// Bigger gains for filestore, 10x
-			require_True(t, elapsedNew*10 < elapsed)
+			// Bigger gains for filestore.
+			require_LessThan(t, elapsedNew*10, elapsed)
 		}
 	}
 }
@@ -3081,12 +3112,12 @@ func TestNoRaceProducerStallLimits(t *testing.T) {
 	s, _ := RunServerWithConfig(conf)
 	defer s.Shutdown()
 
-	ncSlow := natsConnect(t, s.ClientURL())
+	ncSlow := natsConnect(t, s.ClientURL(), nats.Name("slow"))
 	defer ncSlow.Close()
 	natsSub(t, ncSlow, "foo", func(m *nats.Msg) { m.Respond([]byte("42")) })
 	natsFlush(t, ncSlow)
 
-	ncProd := natsConnect(t, s.ClientURL())
+	ncProd := natsConnect(t, s.ClientURL(), nats.Name("fast"))
 	defer ncProd.Close()
 
 	cid, err := ncSlow.GetClientID()
@@ -3129,6 +3160,41 @@ func TestNoRaceProducerStallLimits(t *testing.T) {
 	// Should always be close to totalAllowed (e.g. 10ms), but if you run a lot of them in one go can bump up
 	// just past it, hence the Max setting below to avoid a flapper.
 	require_LessThan(t, elapsed, stallTotalAllowed+20*time.Millisecond)
+
+	var tc *client
+	s.mu.Lock()
+	for _, client := range s.clients {
+		client.mu.Lock()
+		if client.opts.Name == "slow" {
+			tc = client
+			client.mu.Unlock()
+			break
+		}
+		client.mu.Unlock()
+	}
+	s.mu.Unlock()
+
+	// Verify counter was incremented.
+	totalStalls := atomic.LoadInt64(&tc.stalls)
+	if totalStalls == 0 {
+		t.Fatalf("Expected stalls count to be incremented, got: %d", totalStalls)
+	}
+
+	// Verify this shows up in Connz monitoring.
+	pconns := pollConnz(t, s, 1, "", nil)
+	var connzStalls int64
+	for _, conn := range pconns.Conns {
+		if conn.Cid == tc.cid {
+			connzStalls = conn.Stalls
+			break
+		}
+	}
+	if connzStalls < 1 {
+		t.Fatalf("Expected connz stalls count to be incremented, got: %d", connzStalls)
+	}
+	if s.NumStalledClients() < 1 {
+		t.Fatalf("Expected total stalled clients to be incremented, got: %d", s.NumStalledClients())
+	}
 }
 
 func TestNoRaceJetStreamClusterConsumerDeleteInterestPolicyPerf(t *testing.T) {
@@ -3251,7 +3317,7 @@ func TestNoRaceJetStreamClusterConsumerDeleteInterestPolicyPerf(t *testing.T) {
 		t.Fatalf("Deleting AckNone consumer took too long: %v", elapsed)
 	}
 
-	expectedStreamMsgs(499_995)
+	expectedStreamMsgs(499_950)
 
 	// Now do AckAll
 	start = time.Now()
@@ -3261,7 +3327,7 @@ func TestNoRaceJetStreamClusterConsumerDeleteInterestPolicyPerf(t *testing.T) {
 		t.Fatalf("Deleting AckAll consumer took too long: %v", elapsed)
 	}
 
-	expectedStreamMsgs(499_995)
+	expectedStreamMsgs(499_950)
 
 	// Now do AckExplicit
 	start = time.Now()
@@ -3358,7 +3424,7 @@ func TestNoRaceJetStreamClusterConsumerDeleteInterestPolicyUniqueFiltersPerf(t *
 		t.Fatalf("Deleting AckNone consumer took too long: %v", elapsed)
 	}
 
-	expectedStreamMsgs(499_900)
+	expectedStreamMsgs(499_800)
 
 	start = time.Now()
 	err = js.DeleteConsumer("TEST", "C0")
@@ -3443,4 +3509,101 @@ func TestNoRaceAccessTimeLeakCheck(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func TestNoRaceQuickMultipleConfigReloadRemoteLeafNoDuplicate(t *testing.T) {
+	// This test is to demonstrate that if we perform quicj disable/enable,
+	// or remove/add of remote leafnodes, we don't end up with multiple
+	// "connect to remote" go routines for the same remote, leading to duplicate
+	// remote leafnodes.
+
+	conf1 := createConfFile(t, []byte(`
+		port: -1
+		server_name: "A"
+		leafnodes {
+			listen: "127.0.0.1:-1"
+		}
+	`))
+	s1, o1 := RunServerWithConfig(conf1)
+	defer s1.Shutdown()
+	l := &captureErrorLogger{errCh: make(chan string, 100)}
+	s1.SetLogger(l, false, false)
+
+	tmpl2 := `
+		port: -1
+		server_name: "B"
+		leafnodes {
+			reconnect_interval: "50ms"
+			remotes [
+				%s
+			]
+		}
+	`
+
+	configWithAdded := fmt.Appendf(nil, tmpl2,
+		fmt.Sprintf(`{url: "nats://127.0.0.1:%d"}`, o1.LeafNode.Port))
+	configWithRemoved := fmt.Appendf(nil, tmpl2, _EMPTY_)
+	configWithDisabled := fmt.Appendf(nil, tmpl2,
+		fmt.Sprintf(`{url: "nats://127.0.0.1:%d", disabled: true}`, o1.LeafNode.Port))
+	configWithEnabled := fmt.Appendf(nil, tmpl2,
+		fmt.Sprintf(`{url: "nats://127.0.0.1:%d", disabled: false}`, o1.LeafNode.Port))
+
+	conf2 := createConfFile(t, configWithEnabled)
+	s2, _ := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+
+	checkLeafNodeConnectedCount(t, s2, 1)
+
+	for _, test := range []struct {
+		name     string
+		disabled bool
+	}{
+		{"disabled_enabled", true},
+		{"removed_added", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var disabledOrRemoved bool
+			// We pick a number that will end the loop with enabled/added remote.
+			for range 20 {
+				disabledOrRemoved = !disabledOrRemoved
+				var config []byte
+				if test.disabled {
+					if disabledOrRemoved {
+						config = configWithDisabled
+					} else {
+						config = configWithEnabled
+					}
+				} else {
+					if disabledOrRemoved {
+						config = configWithRemoved
+					} else {
+						config = configWithAdded
+					}
+				}
+				err := os.WriteFile(conf2, config, 0666)
+				require_NoError(t, err)
+				deadline := time.Now().Add(1500 * time.Millisecond)
+				for time.Now().Before(deadline) {
+					err = s2.Reload()
+					if err == nil || !strings.Contains(err.Error(), "try again") {
+						break
+					}
+				}
+				require_NoError(t, err)
+			}
+			checkLeafNodeConnectedCount(t, s2, 1)
+
+			for {
+				select {
+				case errTxt := <-l.errCh:
+					if strings.Contains(errTxt, DuplicateRemoteLeafnodeConnection.String()) {
+						t.Fatalf("Duplicates detected: %s", errTxt)
+					}
+				default:
+					// No error, all ok!
+					return
+				}
+			}
+		})
+	}
 }
